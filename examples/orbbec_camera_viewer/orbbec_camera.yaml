@@ -1,0 +1,257 @@
+# Orbbec Gemini 2 传感器节点完整配置（参考模板）
+# 参数范围来源：设备实测（SN: AY6V16300Z4，固件 1.4.92，2026-04-29）
+# 与本目录 dataflow.yaml / dataflow_binary.yaml 配套；包内已无重复副本。
+#
+# 用法：
+#   在本目录跑 dora：dataflow 中 `args: --config orbbec_camera.yaml`。
+#   仓库根调试节点：`uv run orbbec-camera --config examples/orbbec_camera_viewer/orbbec_camera.yaml`
+#
+# tick 与 color.data_flow.fps：改 dataflow 里 orbbec_camera.inputs.tick（见 dataflow.yaml 头注释），勿只改本文件 fps。
+#
+# ── Gemini 2 实测 Depth Work Mode（dev.get_depth_work_mode_list()）──────────
+#   0: 'Unbinned Dense Default'   ← 开机默认，全分辨率稠密深度
+#   1: 'Binned Sparse Default'    ← bin 2×2，稀疏深度，噪声更低
+#   2: 'Unbinned Sparse Default'  ← 全分辨率稀疏深度
+#   3: 'In-scene Calibration'     ← 场内标定专用，不输出正常深度
+#   4: 'Obstacle Avoidance'       ← 避障模式（短距离优化）
+#
+# ── Depth 流可用 Profile（实测）──────────────────────────────────────────────
+#   分辨率: 1280×800 / 640×400 / 320×200
+#   格式:   Y16（毫米 uint16） / Y14（压缩） / RLE（行程编码）
+#   帧率:   5 / 10 / 15 / 30 fps
+#   注：本节点请求 Y16 格式；若未找到则回退默认 profile
+#
+# ── Color 流可用 Profile（实测）─────────────────────────────────────────────
+#   1920×1080 / 1280×720 / 640×480 / 640×360
+#   格式:   RGB888（rgb8） / MJPG（jpeg） / YUYV
+#   帧率:   5 / 10 / 15 / 30 fps
+#
+# ── IR 流可用 Profile（实测）────────────────────────────────────────────────
+#   1280×800 / 640×400 / 320×200
+#   格式:   Y8（ir8） / MJPG
+#   帧率:   5 / 10 / 15 / 30 fps
+
+# ── 设备识别 ────────────────────────────────────────────────────────────────
+# 多设备时推荐用 serial，通过 `uv run orbbec-list-devices` 查看
+# device_serial: "AY6V16300Z4"
+device_index: 0                    # 设备索引，未指定 serial 时使用
+
+# ── Color 流（与 Orbbec Viewer「Color」数据流 + 控制两块对齐）──────────────
+# 实测 Color Profile（固件 1.4.92）: 640×360/480 / 1280×720 / 1920×1080，帧率 5/10/15/30
+# 实测可用格式: RGB888(rgb8) / MJPG(jpeg) / YUYV(yuyv)，三种均可正常采集
+color:
+  # 1 数据流（需重启）
+  data_flow:
+    width: 1280                    # 实测可用: 640 / 1280 / 1920
+    height: 720                    # 与 width 配对: 360/480 / 720 / 1080
+    fps: 30                        # 实测可用: 5 / 10 / 15 / 30；与 dataflow tick 对齐：30→millis/33
+    # format — 传输格式（对应 Viewer「格式」下拉）
+    #   rgb8  → RGB888，无压缩（默认，推荐）；所有控制参数均有效
+    #   jpeg  → MJPG 压缩（22x，3.7 MB/s vs 83 MB/s；主机 cv2 解码 2.76ms/帧）
+    #           参数有效性取决于属性 ID 所属层级（来源：官方 UI 日志确认）：
+    #           ✅ UVC 标准控制（ID ≥ 2000）→ 所有格式均有效：
+    #               auto_exposure, exposure_us, gain
+    #               auto_white_balance, white_balance
+    #               brightness, contrast, saturation, sharpness
+    #               power_line_frequency
+    #           ❌ Orbbec 私有属性（ID < 2000）→ 仅 RGB ISP 路径有效，MJPG 无效：
+    #               mirror (ID=81), flip (ID=82), rotate (ID=115)
+    #               → 节点内 cv2 自动软件补偿（透明处理，用户无感知）
+    #   yuyv  → YUYV，标准 UVC；所有控制参数均有效
+    format: rgb8                   # rgb8 / jpeg / yuyv
+    # jpeg_quality（仅 format=jpeg 时节点内对解码帧重编码输出）
+    jpeg_quality: 85               # [1, 100]
+
+  # 2 控制（实时生效；参数范围均来自设备实测，JPEG 格式目视测试全部确认）
+  control:
+    # 图像方向（对应 Viewer Mirror / Flip）
+    mirror: false
+    flip: false
+    rotate: 0                      # 0 / 90 / 180 / 270
+
+    # 白平衡（对应 Viewer Auto White Balance）
+    auto_white_balance: true
+    # white_balance: 5000          # [2800, 6800] K，step=10；需 auto_white_balance: false
+
+    # 曝光（对应 Viewer Auto Exposure / Adjust Exposure / Adjust Gain）
+    auto_exposure: true
+    # exposure_us: 1955            # [0, 33000] μs，step=1；需 auto_exposure: false
+    # gain: 127                    # [1, 255]，step=2；需 auto_exposure: false
+
+    # 图像质量（设备实测默认值；不需要修改时可改回 null 让节点跳过写入）
+    # JPEG 格式目视测试全部 ✅（UVC 标准控制，ID≥2000，与格式无关）
+    brightness: 52                 # [1, 255]，设备默认 52
+    contrast: 40                   # [0, 255]，设备默认 40
+    saturation: 32                 # [0, 255]，设备默认 32
+    sharpness: 99                  # [0, 255]，设备默认 99
+    power_line_frequency: 0        # 0=关（默认）/ 1=50Hz / 2=60Hz（按实际灯光选择）
+
+# ── Depth 流（与 Orbbec Sample Viewer「Depth」四块一致；亦可全部扁平写在 depth 下，见 config.py）──
+depth:
+  # 1 数据流：分辨率 / 帧率 / 工作模式（需重启）
+  data_flow:
+    enabled: true
+    width: 640                       # 实测可用: 320 / 640 / 1280（对应高度 200 / 400 / 800）
+    height: 400                      # 与 width 配对，见上方 Depth Profile 列表
+    fps: 30                          # 实测可用: 5 / 10 / 15 / 30
+    # format — 深度传输格式（实测三种 SDK 均在主机端输出 Y16；差异在 USB 传输编码）
+    #   y16 — 标准 16-bit（默认，直接传输，无压缩，兼容性最好）
+    #   y14 — 14-bit 线上打包，SDK 自动解包为 Y16，数值范围 [0, 16383]，USB 带宽与 y16 相同
+    #   rle — 行程编码，静止场景可降低 USB 带宽，SDK 自动解码为 Y16
+    #   提取代码无需区分：三种格式 frame.get_data() 均返回相同字节数的 uint16 数组
+    format: y16                      # y16 / y14 / rle
+    # depth_work_mode（实测全部切换成功，值须与下表精确一致）：
+    #   "Unbinned Dense Default"   → 全分辨率 1280×800 稠密深度（开机默认）
+    #                                 valid=89% mean=1860mm std=581mm
+    #   "Binned Sparse Default"    → bin 2×2 输出 640×400 稀疏，噪声更低
+    #                                 valid=87% mean=1895mm std=547mm（推荐远距场景）
+    #   "Unbinned Sparse Default"  → 全分辨率 1280×800 稀疏深度
+    #                                 valid=90% mean=1851mm std=591mm
+    #   "In-scene Calibration"     → 场内标定专用，不输出正常深度，禁止用于生产
+    #   "Obstacle Avoidance"       → 短距避障优化（<3m），std=534mm 最低
+    #                                 valid=87% mean=1906mm std=534mm
+    depth_work_mode: null            # null=不切换（保持设备当前模式）
+    # depth_work_mode: "Binned Sparse Default"  # 远距/噪声敏感推荐
+
+  # 2 控制：方向 + 曝光（实时；手动曝光须 auto_exposure: false 且填 exposure / gain）
+  control:
+    mirror: true
+    flip: false
+    rotate: 0                        # 0 / 90 / 180 / 270
+    auto_exposure: true
+    # exposure: 3000                 # [200, 10000]
+    # gain: 1000                     # [1000, 15000], step=100
+
+  # 3 高级控制（对应 UI「高级控制」块）
+  advanced:
+    # 视差转深度（硬件）
+    disparity_to_depth: true         # OB_PROP_DISPARITY_TO_DEPTH_BOOL
+
+    # 深度有效范围：Gemini 2 实测 hw_min/hw_max 不支持（probe 确认）→ 始终软件裁剪
+    min_mm: 100                      # 深度下限（mm）；超出置 0
+    max_mm: 10000                    # 深度上限（mm）；超出置 0
+
+    # 深度单位（毫米）：Gemini 2 实测不支持此属性（probe 确认）
+    depth_unit: null                 # null=保持设备默认（1.0mm per pixel，scale 由 get_depth_scale() 返回）
+
+    # 去噪滤波（对应 UI「去噪滤波」开关 + Min Diff / Max Size 滑条）
+    # 实测：noise_removal_filter = soft_filter（同 property ID=24）；默认已开启
+    noise_removal_filter: true       # OB_PROP_DEPTH_NOISE_REMOVAL_FILTER_BOOL（设备默认: true）
+    noise_removal_max_diff: null     # Min Diff；实测范围 [1,10000] step=1，设备默认 256；null=不修改
+    noise_removal_max_speckle: null  # Max Size；实测范围 [1,1000] step=1，设备默认 200；null=不修改
+
+    # 精度等级（影响 DepthFrame.get_depth_scale()）
+    # 实测 range=[6,0]（Gemini 2 当前固件仅支持 1mm 精度，其余枚举预留）
+    precision_level: null            # 0=1mm（默认）；null=不修改
+
+    # 其他设备级滤波（实测结果：post_filter 不支持；rm_filter 支持但读取报错，谨慎使用）
+    hole_filter: false               # 实测支持，默认 false
+    post_filter: null                # 实测不支持（Gemini 2），建议保持 null
+    soft_filter: null                # 与 noise_removal_filter 同 property ID，建议用上面那项
+    soft_filter_max_diff: null       # 同 noise_removal_max_diff
+    soft_filter_max_speckle: null    # 同 noise_removal_max_speckle
+    rm_filter: null                  # 实测支持但读取异常，null=不修改
+
+    # ── 后处理 SDK 管道滤波（对应 UI「后处理」四个子开关；客户端每帧软件应用）────────
+    # ── DisparityTransform（推荐列表中默认已启用；是控制深度范围/单位的正确路径）────
+    # min_mm / max_mm / depth_unit 会通过此滤波器的 set_config_value() 设置
+    # （Gemini 2 不支持 OB_PROP_MIN/MAX_DEPTH_INT 设备属性，故由 SDK 滤波器接管）
+
+    # ── ThresholdFilter（推荐列表中默认已启用；与 DisparityTransform 共同保护范围）─
+    # min_mm / max_mm 同样传入 ThresholdFilter
+
+    # 边缘滤波（SDK EdgeNoiseRemovalFilter；实测参数见 get_config_schema_vec()）
+    edge_filter: false
+    edge_margin_x_th: null          # [0, 640]，null=SDK 默认(6)
+    edge_margin_y_th: null          # [0, 400]，null=SDK 默认(6)
+    edge_limit_x_th: null           # [1, 640]，null=SDK 默认(70)
+    edge_limit_y_th: null           # [1, 400]，null=SDK 默认(30)
+    edge_vertical_direction: null   # true/false，null=SDK 默认(false)
+
+    # 空域滤波（SDK SpatialAdvancedFilter；实测参数）
+    spatial_filter: false
+    spatial_magnitude: null         # [1, 5]，null=SDK 默认(1)
+    spatial_alpha: null             # [0.1, 1.0]，null=SDK 默认(0.5)
+    spatial_disp_diff: null         # [1, 10000]，null=SDK 默认(160)
+    spatial_radius: null            # [0, 8]，null=SDK 默认(1)
+
+    # 时域滤波（SDK TemporalFilter；实测参数）
+    temporal_filter: false
+    temporal_diff_scale: null       # [0.1, 1.0]，null=SDK 默认(0.1)
+    temporal_weight: null           # [0.1, 1.0]，null=SDK 默认(0.4)
+
+    # 填洞滤波（SDK HoleFillingFilter；与 hole_filter 设备 property 不同，客户端处理）
+    hole_fill_filter: false
+    hole_fill_mode: TOP             # TOP(0) / NEAREST(1) / FURTHEST(2)
+
+  # 4 渲染（Visualization / Display Range）
+  # min_mm / max_mm 已在 advanced 中配置，同时作为硬件范围写入设备（或软件裁剪兜底）
+  rendering: {}
+
+# ── IR 流（与 Orbbec Viewer「IR」数据流 + 控制两块对齐）──────────────────────
+# IR 与 Depth 共用传感器，分辨率须保持一致
+# 实测 IR Profile（固件 1.4.92）: 320×200 / 640×400 / 1280×800，帧率 5/10/15/30
+# 实测可用格式: Y8(ir8) / MJPG(mjpg)；Y16 不可用
+ir:
+  # 1 数据流（需重启）
+  data_flow:
+    enabled: true
+    width: 640                     # 实测可用: 320 / 640 / 1280（须与 depth 一致）
+    height: 400                    # 与 width 配对: 200 / 400 / 800
+    fps: 30                        # 实测可用: 5 / 10 / 15 / 30
+    # format — IR 传输格式（对应 Viewer「格式」下拉，A/B 测试确认两种均可解析）
+    #   ir8  → Y8 uint8 灰度（直接 reshape，带宽最省，默认）
+    #   mjpg → MJPG 压缩（cv2.imdecode→uint8，shape=(400,640)，mean=7.4，✅ 实测成功）
+    format: ir8                    # ir8 / mjpg
+
+  # 2 控制（实时生效；参数范围均来自设备实测，A/B 测试确认，固件 1.4.92）
+  control:
+    # 图像方向（对应 Viewer Mirror / Flip / Rotate）
+    # A/B 测试结果：在暗/均匀场景下 mean/std 不变属正常（全局统计无法反映空间翻转）
+    # 建议在有纹理/亮度差异的场景下用 image_viewer 目视确认方向变化
+    mirror: false
+    flip: false
+    rotate: 0                      # 0 / 90 / 180 / 270
+
+    # 曝光控制（对应 Viewer Auto Exposure / Adjust Exposure / Adjust Gain）
+    # A/B 测试结果（AE off 时）：
+    #   auto_exposure false + exp=200：mean 7.2→0.0，std 6.7→0.2  ✅ 效果极显著
+    #   gain 1000→15000（exp=3000）：  mean 0.5→67.4，std 2.0→49.9 ✅ 效果极显著
+    #   exposure 200→10000：           mean 5.3→7.2（Δ=1.9）       ➖ 统计临界，功能正常
+    auto_exposure: true            # true=自动曝光（默认）/ false=手动曝光
+    # exposure_us: 3000            # 实测范围: [200, 10000] μs，step=1，设备默认 5000
+    # gain: 1000                   # 实测范围: [1000, 15000]，step=100，设备默认 1000
+                                   # exposure_us / gain 须 auto_exposure: false 时才生效
+
+    # IR 数据通道（双目 IR 模式选择左/右路）
+    # A/B 测试：0→1 mean 4.6→7.6（Δ=3.0） ✅ 两路亮度不同，说明 Left/Right 确实不同
+    channel_data_source: null      # 0=Left IR（默认）/ 1=Right IR
+
+# ── 激光投射器 ───────────────────────────────────────────────────────────────
+laser:
+  enabled: true                    # 激光总开关（pipeline 启动后由 SDK 自动管理）
+  power_level: null                # 激光功率等级，范围: [0, 5]，5=最强（默认）
+  ldp_enabled: true                # LDP 安全保护，建议保持 true（距离过近时自动关闭激光）
+
+# ── 帧对齐（对应 Sample Viewer 中 Depth↔Color「D2C」：disable=关闭 / sw≈软件 D2C / hw≈硬件 D2C）──
+# ── 帧对齐 ───────────────────────────────────────────────────────────────────
+# ⚠️  三路数据通道的耦合关系说明：
+#   - disable（默认）：三路完全独立输出，各自保持原生分辨率和坐标系
+#   - sw：Depth 重投影到 Color 坐标系（软件对齐），depth 方向随 color 改变，
+#          depth 输出分辨率变为 color 分辨率——两路空间对应但存在方向耦合
+#   - hw：同 sw 但使用硬件加速对齐（部分机型支持）
+# ⚠️  Depth 与 IR 共用同一物理传感器，分辨率（width/height/fps）须保持一致
+align_mode: disable                # disable（默认，三路独立）/ sw（depth 对齐到 color）/ hw
+
+# ── 帧同步 ───────────────────────────────────────────────────────────────────
+frame_sync: false                  # 硬件帧同步，多台摄像头同步时使用
+
+# ── 启动参数 ─────────────────────────────────────────────────────────────────
+prewarm_frames: 0                  # 启动后丢弃前N帧，消除首帧异常，范围: [0, 60]
+connect_delay_ms: 0                # 连接前等待（ms），多节点时错开USB抢占
+init_timeout_sec: 15.0             # 设备初始化超时（秒）
+
+# ── dora 输出 topic ──────────────────────────────────────────────────────────
+output_color: image/color          # Color 输出 topic
+output_depth: image/depth          # Depth 输出 topic
+output_ir: image/ir                # IR 输出 topic

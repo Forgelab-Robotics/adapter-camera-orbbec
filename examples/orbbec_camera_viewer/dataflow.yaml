@@ -1,0 +1,29 @@
+# Orbbec Gemini 2 + 通用 Rust image_viewer（源码节点）
+# 运行：在 examples/orbbec_camera_viewer 目录下
+#   确保 image_viewer 已加入 PATH
+#   dora build dataflow.yaml --uv && dora run dataflow.yaml --uv
+#
+# tick 与 orbbec_camera.yaml 中 color.data_flow.fps 对齐：改 orbbec_camera.inputs.tick 的 dora/timer/millis/<N>
+#   N ≈ round(1000 / fps)
+#   例：30fps → millis/33；15 → millis/67；10 → millis/100；5 → millis/200
+# 只改 orbbec_camera.yaml 里的 fps 而不改 tick：节点仍按原 tick 被唤醒；与旧 dataflow 模板行为一致。
+#
+# 若已用 PyInstaller 打包 orbbec_camera，请改用同目录 dataflow_binary.yaml（path 指向仓库根 dist/orbbec_camera）。
+
+nodes:
+  - id: orbbec_camera
+    path: uv
+    inputs:
+      tick: dora/timer/millis/33
+    outputs:
+      - image/color
+      - image/depth
+      - image/ir
+    args: "run --project ../.. orbbec-camera --config orbbec_camera.yaml"
+
+  - id: image_viewer
+    path: image_viewer
+    inputs:
+      image/color: orbbec_camera/image/color
+      image/depth: orbbec_camera/image/depth
+      image/ir: orbbec_camera/image/ir

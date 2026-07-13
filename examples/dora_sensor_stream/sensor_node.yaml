@@ -1,0 +1,28 @@
+device_index: 0
+align_mode: disable
+color:
+  data_flow:
+    width: 640
+    height: 480
+    fps: 30
+    format: rgb8
+depth:
+  data_flow:
+    enabled: true
+    width: 640
+    height: 400
+    fps: 30
+    format: y16
+  advanced:
+    min_mm: 100
+    max_mm: 10000
+ir:
+  data_flow:
+    enabled: true
+    width: 640
+    height: 400
+    fps: 30
+    format: ir8
+output_color: image/color
+output_depth: image/depth
+output_ir: image/ir

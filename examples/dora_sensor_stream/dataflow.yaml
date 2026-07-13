@@ -1,0 +1,18 @@
+nodes:
+  - id: sensor_node
+    path: uv
+    inputs:
+      tick: dora/timer/millis/33
+    outputs:
+      - image/color
+      - image/depth
+      - image/ir
+    args: "run --project ../.. orbbec-camera --config sensor_node.yaml"
+
+  - id: test_sink
+    path: uv
+    inputs:
+      image/color: sensor_node/image/color
+      image/depth: sensor_node/image/depth
+      image/ir: sensor_node/image/ir
+    args: "run --project ../.. python test_sink.py --config test_sink.yaml"

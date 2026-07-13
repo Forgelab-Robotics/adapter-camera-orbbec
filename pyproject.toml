@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-devices-orbbec-camera"
+version = "0.1.0"
+description = "Orbbec Gemini 2 depth camera dora node"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dora-rs==0.4.1",
+    "forge-common",
+    "forge-msgs",
+    "pyorbbecsdk2>=2.0.18",
+    "numpy",
+    "opencv-python",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+build = [
+    "pyinstaller",
+]
+
+[project.scripts]
+orbbec-camera = "forge_devices_orbbec_camera.main:main"
+orbbec_camera = "forge_devices_orbbec_camera.main:main"
+orbbec-list-devices = "forge_devices_orbbec_camera.list_devices:main"
+orbbec-probe-device = "forge_devices_orbbec_camera.probe_device:main"
+
+[tool.uv.sources]
+forge-common = { git = "https://gitlab.ex-ai.cn/meta-emt/framework/forge.git", rev = "dev", subdirectory = "packages/common" }
+forge-msgs = { git = "https://gitlab.ex-ai.cn/meta-emt/framework/forge.git", rev = "dev", subdirectory = "packages/msgs" }
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

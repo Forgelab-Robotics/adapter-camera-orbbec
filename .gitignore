@@ -1,0 +1,12 @@
+.venv/
+.venv_build/
+build/
+dist/
+Log/
+sdk/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+examples/**/out/
+sample_output/*
+!sample_output/README.md

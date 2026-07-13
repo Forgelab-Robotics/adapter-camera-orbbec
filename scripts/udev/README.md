@@ -1,0 +1,9 @@
+# udev 规则（仓库托管，不依赖 `sdk/`）
+
+`99-obsensor-libusb.rules` 的设备 ID 源自 Orbbec pyorbbecsdk 发布包，但权限已收紧为
+`0660`、`video` 组并附加 `uaccess`，不再使用厂商规则中的全局可写 `0666`。
+[`setup.sh`](../setup.sh) 从本目录读取并安装到 `/etc/udev/rules.d/`，并在有
+`apt-get` 时安装 `libusb-1.0-0` 运行时；依赖安装失败会非零退出。开发头文件
+`libusb-1.0-0-dev` 需自行安装。
+
+升级 SDK 大版本时可同步新增设备 ID，但必须保留上述最小权限设置。

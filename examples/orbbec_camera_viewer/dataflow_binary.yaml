@@ -1,0 +1,24 @@
+# Orbbec Gemini 2 + 通用 Rust image_viewer（PyInstaller 单文件 orbbec_camera）
+# 运行前先构建二进制：
+#   bash scripts/build_pyinstaller.sh
+# 并确保 image_viewer 已加入 PATH
+# 再在 examples/orbbec_camera_viewer 目录下：
+#   dora build dataflow_binary.yaml --uv && dora run dataflow_binary.yaml --uv
+
+nodes:
+  - id: orbbec_camera
+    path: ../../dist/orbbec_camera
+    inputs:
+      tick: dora/timer/millis/33
+    outputs:
+      - image/color
+      - image/depth
+      - image/ir
+    args: --config orbbec_camera.yaml
+
+  - id: image_viewer
+    path: image_viewer
+    inputs:
+      image/color: orbbec_camera/image/color
+      image/depth: orbbec_camera/image/depth
+      image/ir: orbbec_camera/image/ir
