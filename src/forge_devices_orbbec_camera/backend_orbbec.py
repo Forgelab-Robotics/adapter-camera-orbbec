@@ -61,13 +61,15 @@ class OrbbecBackend:
 
     采用后台线程持续采集：
     - 后台线程：不断调用 pipeline.wait_for_frames()，将最新 OrbbeFrame 存入缓存。
-    - 主线程：capture_frame() 取缓存中最新帧；若缓存为空则阻塞直到首帧到达。
+    - 消费端：capture_frame() 取最新帧；wait_new_frame() 等待更新的帧序号。
     """
 
     def __init__(self, config: OrbbecConfig) -> None:
         self._config = config
         self._latest_frame: OrbbeFrame | None = None
+        self._frame_seq: int = 0
         self._lock = threading.Lock()
+        self._frame_cond = threading.Condition(self._lock)
         self._first_frame_event = threading.Event()
         self._stop_event = threading.Event()
         self._init_done = threading.Event()
@@ -77,11 +79,6 @@ class OrbbecBackend:
         self._depth_sdk_filters: list = []
         # 是否已通过硬件写入深度范围（True 则 _extract_depth 跳过软件裁剪）
         self._depth_hw_range_ok: bool = False
-        # MJPG→RGB888 SDK 格式转换器（单次初始化，_extract_color 中复用）
-        # 替代 cv2.imdecode，使用 SDK 官方 FormatConvertFilter（参考 examples/utils.py）
-        # MJPG 解码：cv2.imdecode(libjpeg-turbo) 实测 2.76ms/帧，
-        # 比 SDK FormatConvertFilter(3.33ms) 更快（FormatConvertFilter 有 Frame 封装开销）
-        # Gemini 2 有硬件 JPEG 编码器（22x 压缩），主机侧解码为软件（SDK 无 HW decode 接口）
 
         self._thread = threading.Thread(
             target=self._capture_loop,
@@ -92,6 +89,8 @@ class OrbbecBackend:
 
         if not self._init_done.wait(timeout=config.init_timeout_sec):
             self._stop_event.set()
+            with self._frame_cond:
+                self._frame_cond.notify_all()
             self._thread.join(timeout=5.0)
             raise RuntimeError(
                 f"Orbbec 设备初始化超时 ({config.init_timeout_sec}s)，"
@@ -121,9 +120,32 @@ class OrbbecBackend:
             raise RuntimeError("Orbbec 采集线程已退出，请检查设备是否断开。")
         return frame
 
+    def wait_new_frame(self, after_seq: int, timeout: float = 2.0) -> tuple[OrbbeFrame, int]:
+        """等待比 after_seq 更新的帧；超时则返回当前最新帧及其序号。"""
+        if not self._first_frame_event.wait(timeout=max(timeout, 0.0)):
+            if not self._thread.is_alive():
+                raise RuntimeError("Orbbec 采集线程已退出，请检查设备是否断开。")
+            raise RuntimeError("等待 Orbbec 首帧超时，设备可能无数据输出。")
+
+        deadline = time.monotonic() + max(timeout, 0.0)
+        with self._frame_cond:
+            while True:
+                if self._terminal_error is not None:
+                    raise RuntimeError(f"Orbbec 采集已终止: {self._terminal_error}")
+                if self._latest_frame is not None and self._frame_seq > after_seq:
+                    return self._latest_frame, self._frame_seq
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if self._latest_frame is None:
+                        raise RuntimeError("Orbbec 采集线程已退出，请检查设备是否断开。")
+                    return self._latest_frame, self._frame_seq
+                self._frame_cond.wait(timeout=remaining)
+
     def close(self) -> None:
         """停止采集线程，释放 Pipeline。"""
         self._stop_event.set()
+        with self._frame_cond:
+            self._frame_cond.notify_all()
         self._thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
@@ -206,15 +228,18 @@ class OrbbecBackend:
                     continue
 
                 frame = self._convert_frameset(frameset)
-                with self._lock:
+                with self._frame_cond:
                     self._latest_frame = frame
+                    self._frame_seq += 1
+                    self._frame_cond.notify_all()
                 self._first_frame_event.set()
 
         except Exception as e:
             self._init_error = str(e)
-            with self._lock:
+            with self._frame_cond:
                 self._terminal_error = str(e)
                 self._latest_frame = None
+                self._frame_cond.notify_all()
             self._init_done.set()
             self._first_frame_event.set()
         finally:
@@ -223,6 +248,8 @@ class OrbbecBackend:
                     pipeline.stop()
                 except Exception:
                     pass
+            with self._frame_cond:
+                self._frame_cond.notify_all()
 
     def _configure_alignment(self, ob_config: ob.Config) -> ob.AlignFilter | None:
         """配置对齐模式；硬件模式不允许静默降级为软件实现。"""
@@ -699,65 +726,67 @@ class OrbbecBackend:
         color_frame = frameset.get_color_frame()
         timestamp_ms = int(color_frame.get_timestamp()) if color_frame is not None else 0
 
-        color = self._extract_color(frameset)
+        color, color_jpeg = self._extract_color(frameset)
         depth = self._extract_depth(frameset) if self._config.depth.enabled else None
         ir = self._extract_ir(frameset) if self._config.ir.enabled else None
 
-        return OrbbeFrame(color=color, depth=depth, ir=ir, timestamp_ms=timestamp_ms)
+        return OrbbeFrame(
+            color=color,
+            depth=depth,
+            ir=ir,
+            timestamp_ms=timestamp_ms,
+            color_jpeg=color_jpeg,
+        )
 
-    def _extract_color(self, frameset: ob.FrameSet) -> np.ndarray | None:
-        """提取 Color 帧，返回 HWC uint8 RGB numpy 数组。
-        参考 utils.py frame_to_bgr_image，使用 np.asanyarray。
-        """
+    def _extract_color(self, frameset: ob.FrameSet) -> tuple[np.ndarray | None, bytes | None]:
+        """提取 Color：返回 (RGB uint8, JPEG bytes)。二者至多其一非空。"""
         frame = frameset.get_color_frame()
         if frame is None:
-            return None
+            return None, None
         w, h = frame.get_width(), frame.get_height()
         data = np.asanyarray(frame.get_data())
         fmt = frame.get_format()
+        c = self._config.color
+        need_geom = bool(c.flip or c.mirror or c.rotate)
 
         if fmt == ob.OBFormat.MJPG:
-            # cv2.imdecode(libjpeg-turbo) 解码：2.76ms/帧，比 FormatConvertFilter 更快
-            bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            jpeg_bytes = data.tobytes() if isinstance(data, np.ndarray) else bytes(data)
+            # jpeg 输出且无需软件几何补偿时，直接透传设备 MJPG，避免 decode/re-encode。
+            if c.format == "jpeg" and not need_geom:
+                return None, jpeg_bytes
+
+            bgr = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
             if bgr is None:
-                return None
+                return None, None
             arr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            # OB_PROP_COLOR_MIRROR_BOOL 仅作用于 RGB ISP 管线；MJPG 编码器独立路径忽略此属性
-            # 实测：动态/启动前设置 mirror 均无视觉效果（镜像 diff=65 vs 同侧 diff=2）
-            # 方向变换用 cv2.flip/rotate（比 numpy 更高效）
-            c = self._config.color
             if c.flip:
-                arr = cv2.flip(arr, 0)      # 垂直翻转
+                arr = cv2.flip(arr, 0)
             if c.mirror:
-                arr = cv2.flip(arr, 1)      # 水平镜像
+                arr = cv2.flip(arr, 1)
             if c.rotate == 90:
                 arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
             elif c.rotate == 180:
                 arr = cv2.rotate(arr, cv2.ROTATE_180)
             elif c.rotate == 270:
                 arr = cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            return arr
-        elif fmt == ob.OBFormat.RGB:
-            return np.resize(data, (h, w, 3))
-        elif fmt == ob.OBFormat.BGR:
+            return np.ascontiguousarray(arr), None
+        if fmt == ob.OBFormat.RGB:
+            return np.ascontiguousarray(np.resize(data, (h, w, 3))), None
+        if fmt == ob.OBFormat.BGR:
             bgr = np.resize(data, (h, w, 3))
-            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        elif fmt == ob.OBFormat.YUYV:
+            return np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), None
+        if fmt == ob.OBFormat.YUYV:
             yuyv = np.resize(data, (h, w, 2))
             bgr = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
-            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        else:
-            return None
+            return np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), None
+        return None, None
 
     def _extract_depth(self, frameset: ob.FrameSet) -> np.ndarray | None:
-        """提取 Depth 帧，返回 HW float32 numpy 数组（单位 mm）。
-        参考 sync_align.py，使用 np.frombuffer dtype=uint16。
-        """
+        """提取 Depth：HW float32，单位米。单次 uint16→米，并就地裁剪。"""
         frame = frameset.get_depth_frame()
         if frame is None:
             return None
 
-        # 应用 SDK 后处理滤波链（边缘 / 空域 / 时域 / 填洞）
         if self._depth_sdk_filters:
             try:
                 processed = frame
@@ -780,19 +809,18 @@ class OrbbecBackend:
         if scale <= 0:
             logger.warning("[orbbec_camera] 非法 depth scale=%s，按 1.0 mm/pixel 处理", scale)
             scale = 1.0
-        arr = raw.astype(np.float32) * np.float32(scale)
+        # SDK scale 为毫米/单位；一次乘到米，避免后续再扫一遍。
+        arr = raw.astype(np.float32, copy=False) * np.float32(scale * 0.001)
 
-        # 软件 min/max 裁剪（仅当硬件范围未生效时执行，对应 UI「渲染 / 深度有效范围」兜底）
         if not self._depth_hw_range_ok:
-            lo, hi = self._config.depth.min_mm, self._config.depth.max_mm
-            if lo > 0 or hi < 10000:
-                valid = arr > 0
-                clip = valid & ((arr < lo) | (arr > hi))
-                if np.any(clip):
-                    arr = arr.copy()
-                    arr[clip] = 0
+            lo_m = self._config.depth.min_mm * 0.001
+            hi_m = self._config.depth.max_mm * 0.001
+            if lo_m > 0.0 or hi_m < 10.0:
+                invalid = (arr > 0.0) & ((arr < lo_m) | (arr > hi_m))
+                if np.any(invalid):
+                    arr[invalid] = 0.0
 
-        return arr
+        return np.ascontiguousarray(arr)
 
     def _extract_ir(self, frameset: ob.FrameSet) -> np.ndarray | None:
         """提取 IR 帧，返回 HW uint8（ir8/mjpg）或 uint16（ir16）numpy 数组。
@@ -812,13 +840,12 @@ class OrbbecBackend:
 
         try:
             if ir_fmt == ob.OBFormat.Y8:
-                return np.resize(data, (h, w))
-            elif ir_fmt == ob.OBFormat.MJPG:
+                return np.ascontiguousarray(np.resize(data, (h, w)))
+            if ir_fmt == ob.OBFormat.MJPG:
                 gray = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
-                return gray
-            else:
-                arr = np.frombuffer(data, dtype=np.uint16)
-                return np.resize(arr, (h, w))
+                return None if gray is None else np.ascontiguousarray(gray)
+            arr = np.frombuffer(data, dtype=np.uint16)
+            return np.ascontiguousarray(np.resize(arr, (h, w)))
         except (ValueError, cv2.error):
             return None
 

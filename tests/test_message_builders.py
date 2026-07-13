@@ -52,9 +52,21 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertEqual(decoded.format, "jpeg")
         self.assertGreater(len(decoded.data), 0)
 
-    def test_depth_converts_millimetres_to_32fc1_metres(self) -> None:
+    def test_jpeg_passthrough_prefers_color_jpeg_bytes(self) -> None:
+        config = OrbbecConfig()
+        config.color.format = "jpeg"
+        payload = b"\xff\xd8fake-jpeg\xff\xd9"
+        frame = OrbbeFrame(color=None, depth=None, ir=None, color_jpeg=payload)
+
+        msg = orbbec_main._frame_to_color_image(frame, config)
+
+        self.assertIsInstance(msg, CompressedImage)
+        self.assertEqual(msg.format, "jpeg")
+        self.assertEqual(msg.data, payload)
+
+    def test_depth_metres_pass_through_as_32fc1(self) -> None:
         depth = np.array(
-            [[0.0, 1.5, 1000.0], [1500.25, 2500.0, 10000.0]],
+            [[0.0, 0.0015, 1.0], [1.50025, 2.5, 10.0]],
             dtype=np.float32,
         )
         frame = OrbbeFrame(color=None, depth=depth, ir=None)
@@ -67,12 +79,24 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertEqual(decoded.height, 2)
         self.assertEqual(decoded.encoding, "32FC1")
         self.assertEqual(decoded.step, 3 * np.dtype(np.float32).itemsize)
-        np.testing.assert_allclose(
-            decoded.to_numpy(),
-            depth * 0.001,
-            rtol=0,
-            atol=1e-7,
+        np.testing.assert_allclose(decoded.to_numpy(), depth, rtol=0, atol=1e-7)
+
+    def test_encode_frame_builds_arrow_outputs(self) -> None:
+        config = OrbbecConfig()
+        frame = OrbbeFrame(
+            color=np.zeros((2, 3, 3), dtype=np.uint8),
+            depth=np.ones((2, 3), dtype=np.float32),
+            ir=np.arange(6, dtype=np.uint8).reshape(2, 3),
+            timestamp_ms=42,
         )
+
+        encoded = orbbec_main._encode_frame(frame, config, seq=7)
+
+        self.assertEqual(encoded.seq, 7)
+        self.assertEqual(encoded.timestamp_ms, 42)
+        self.assertIsNotNone(encoded.color)
+        self.assertIsNotNone(encoded.depth)
+        self.assertIsNotNone(encoded.ir)
 
     def test_uint8_ir_uses_mono8_image(self) -> None:
         ir = np.arange(6, dtype=np.uint8).reshape(2, 3)
@@ -136,7 +160,9 @@ class BackendLifecycleTests(unittest.TestCase):
         backend = backend_orbbec.OrbbecBackend.__new__(backend_orbbec.OrbbecBackend)
         backend._config = config
         backend._latest_frame = None
+        backend._frame_seq = 0
         backend._lock = threading.Lock()
+        backend._frame_cond = threading.Condition(backend._lock)
         backend._first_frame_event = threading.Event()
         backend._stop_event = threading.Event()
         backend._stop_event.wait = mock.Mock(return_value=False)
@@ -157,6 +183,8 @@ class BackendLifecycleTests(unittest.TestCase):
         backend._first_frame_event = threading.Event()
         backend._first_frame_event.set()
         backend._lock = threading.Lock()
+        backend._frame_cond = threading.Condition(backend._lock)
+        backend._frame_seq = 1
         backend._latest_frame = OrbbeFrame(
             color=np.zeros((1, 1, 3), dtype=np.uint8),
             depth=None,
@@ -166,6 +194,33 @@ class BackendLifecycleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "device disconnected"):
             backend.capture_frame()
+        with self.assertRaisesRegex(RuntimeError, "device disconnected"):
+            backend.wait_new_frame(0, timeout=0.01)
+
+    def test_wait_new_frame_returns_updated_seq(self) -> None:
+        backend = backend_orbbec.OrbbecBackend.__new__(backend_orbbec.OrbbecBackend)
+        backend._first_frame_event = threading.Event()
+        backend._first_frame_event.set()
+        backend._lock = threading.Lock()
+        backend._frame_cond = threading.Condition(backend._lock)
+        backend._frame_seq = 0
+        backend._latest_frame = None
+        backend._terminal_error = None
+        expected = OrbbeFrame(color=None, depth=None, ir=None, timestamp_ms=9)
+
+        def publish() -> None:
+            import time
+
+            time.sleep(0.05)
+            with backend._frame_cond:
+                backend._latest_frame = expected
+                backend._frame_seq = 3
+                backend._frame_cond.notify_all()
+
+        threading.Thread(target=publish, daemon=True).start()
+        frame, seq = backend.wait_new_frame(0, timeout=1.0)
+        self.assertIs(frame, expected)
+        self.assertEqual(seq, 3)
 
     def test_initialization_timeout_stops_and_joins_thread(self) -> None:
         fake_thread = mock.Mock()
@@ -274,13 +329,14 @@ class ExampleDataflowTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 self.assertNotIn("test_viewer.py", text)
                 self.assertIn("image_viewer", text)
-                self.assertIn("forge_runtime", text)
+                self.assertNotIn("../../../../../forge_runtime", text)
 
     def test_packaging_and_permissions_follow_project_policy(self) -> None:
         build_script = (PACKAGE_ROOT / "scripts" / "build_pyinstaller.sh").read_text()
         self.assertIn("uv sync", build_script)
         self.assertIn("--frozen", build_script)
         self.assertIn("--group build", build_script)
+        self.assertIn("--no-default-groups", build_script)
         self.assertNotIn("uv pip install", build_script)
 
         rules = (PACKAGE_ROOT / "scripts" / "udev" / "99-obsensor-libusb.rules").read_text()

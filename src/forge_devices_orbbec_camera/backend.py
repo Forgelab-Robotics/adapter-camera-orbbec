@@ -23,18 +23,20 @@ if TYPE_CHECKING:
 class OrbbeFrame:
     """一次采集周期的三路帧数据。
 
-    所有数组均为 numpy，不含任何 pyorbbecsdk 类型。
+    所有数组均为 numpy / bytes，不含任何 pyorbbecsdk 类型。
 
-    - color:  HWC uint8，shape (H, W, 3)，RGB 顺序。None 表示本帧未采到。
-    - depth:  HW float32，shape (H, W)，单位 mm。None 表示未启用或未采到。
+    - color:  HWC uint8，shape (H, W, 3)，RGB 顺序。None 表示未采到或仅有 JPEG 透传。
+    - depth:  HW float32，shape (H, W)，单位米。None 表示未启用或未采到。
     - ir:     HW uint8 或 uint16，shape (H, W)。None 表示未启用或未采到。
     - timestamp_ms: 帧时间戳（毫秒），来自 SDK，用于调试和日志。
+    - color_jpeg: 设备 MJPG 透传字节；与 color 互斥优先用于 jpeg 输出。
     """
 
     color: np.ndarray | None
     depth: np.ndarray | None
     ir: np.ndarray | None
     timestamp_ms: int = 0
+    color_jpeg: bytes | None = None
 
     @property
     def color_shape(self) -> tuple[int, int] | None:
@@ -86,6 +88,14 @@ class CaptureBackend(Protocol):
         - 若后台线程已有新帧，立即返回最新帧。
         - 若尚无新帧（如首次调用），阻塞直到收到第一帧。
         - 若设备断开，抛出 RuntimeError。
+        """
+        ...
+
+    def wait_new_frame(self, after_seq: int, timeout: float = 2.0) -> tuple[OrbbeFrame, int]:
+        """等待比 after_seq 更新的一帧，返回 (frame, seq)。
+
+        超时仍返回当前最新帧与其 seq（可能仍等于 after_seq）。
+        设备终止时抛出 RuntimeError。
         """
         ...
 

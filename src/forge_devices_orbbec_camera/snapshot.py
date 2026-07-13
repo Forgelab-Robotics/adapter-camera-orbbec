@@ -44,14 +44,34 @@ def _write_color_jpeg(rgb: np.ndarray, out_path: Path, quality: int) -> None:
         raise RuntimeError(f"cv2.imwrite 失败: {out_path}")
 
 
-def _write_depth_png(depth: np.ndarray, out_path: Path) -> None:
-    """将后端 float32 毫米深度裁剪为 uint16 16-bit PNG。"""
-    depth_mm = np.clip(depth, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+def _write_color_jpeg_bytes(jpeg: bytes, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(jpeg)
+
+
+def _write_depth_png(depth_m: np.ndarray, out_path: Path) -> None:
+    """将后端 float32 米深度转为 uint16 毫米 PNG。"""
+    depth_mm = np.clip(depth_m * 1000.0, 0, np.iinfo(np.uint16).max).astype(np.uint16)
     ok, buf = cv2.imencode(".png", depth_mm)
     if not ok:
         raise RuntimeError("depth PNG 编码失败")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(buf.tobytes())
+
+
+def _frame_has_visible_color(frame: OrbbeFrame) -> bool:
+    if frame.color_jpeg:
+        return True
+    return frame.color is not None and _rgb_has_visible_content(frame.color)
+
+
+def _write_frame_color(frame: OrbbeFrame, out_path: Path, quality: int) -> None:
+    if frame.color_jpeg is not None:
+        _write_color_jpeg_bytes(frame.color_jpeg, out_path)
+        return
+    if frame.color is None:
+        raise RuntimeError("本帧无 Color 数据")
+    _write_color_jpeg(frame.color, out_path, quality)
 
 
 def _write_ir(ir: np.ndarray, out_path: Path, *, ir_format: str) -> None:
@@ -89,19 +109,18 @@ def run_snapshot(
         frame: OrbbeFrame | None = None
         for attempt in range(SNAPSHOT_MAX_DARK_SKIPS + 1):
             f = backend.capture_frame()
-            c = f.color
-            if c is not None and _rgb_has_visible_content(c):
+            if _frame_has_visible_color(f):
                 frame = f
                 break
             if attempt > 0 and attempt % 8 == 0:
                 logger.warning("snapshot: 仍偏暗/空帧，继续抓取…")
 
-        if frame is None or frame.color is None:
+        if frame is None or (frame.color is None and not frame.color_jpeg):
             logger.error("错误：连续 %s 次未得到有效 Color 帧。", SNAPSHOT_MAX_DARK_SKIPS + 1)
             return 1
 
         if not all_streams:
-            _write_color_jpeg(frame.color, out_arg, cfg.color.jpeg_quality)
+            _write_frame_color(frame, out_arg, cfg.color.jpeg_quality)
             logger.info("snapshot: 已写入 %s", out_arg)
             return 0
 
@@ -113,7 +132,7 @@ def run_snapshot(
         depth_path = (parent / f"{stem}_depth.png").resolve()
         ir_path = (parent / f"{stem}_ir.png").resolve()
 
-        _write_color_jpeg(frame.color, color_path, cfg.color.jpeg_quality)
+        _write_frame_color(frame, color_path, cfg.color.jpeg_quality)
         written = [str(color_path)]
 
         if cfg.depth.enabled:

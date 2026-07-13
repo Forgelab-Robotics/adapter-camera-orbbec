@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
+from dataclasses import dataclass
 
+import pyarrow as pa
 from dora import Node
 from forge_common import get_logger
 from forge_msgs import CompressedImage, Image
@@ -186,8 +189,21 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@dataclass
+class EncodedOutputs:
+    """encode 线程产出的最新 Arrow 载荷（drop-old 单槽）。"""
+
+    seq: int
+    timestamp_ms: int
+    color: pa.RecordBatch | None
+    depth: pa.RecordBatch | None
+    ir: pa.RecordBatch | None
+
+
 def _frame_to_color_image(frame: OrbbeFrame, config: OrbbecConfig) -> Image | CompressedImage | None:
-    """将 OrbbeFrame.color 转为 forge_msgs.Image / CompressedImage。"""
+    """将 OrbbeFrame.color / color_jpeg 转为 forge_msgs.Image / CompressedImage。"""
+    if frame.color_jpeg is not None:
+        return CompressedImage(format="jpeg", data=frame.color_jpeg)
     if frame.color is None:
         return None
     if config.color.format == "jpeg":
@@ -200,15 +216,10 @@ def _frame_to_color_image(frame: OrbbeFrame, config: OrbbecConfig) -> Image | Co
 
 
 def _frame_to_depth_image(frame: OrbbeFrame) -> Image | None:
-    """将 OrbbeFrame.depth 转为 forge_msgs.Image。
-
-    将后端毫米深度转换为 float32 米，编码固定为 32FC1。
-    """
+    """将 OrbbeFrame.depth（米 float32）转为 forge_msgs.Image 32FC1。"""
     if frame.depth is None:
         return None
-    # SDK 边界统一提供毫米 float32；公共消息使用米 float32。
-    depth_m = frame.depth.astype("float32") * 0.001
-    return Image.from_numpy(depth_m, encoding="32FC1")
+    return Image.from_numpy(frame.depth, encoding="32FC1")
 
 
 def _frame_to_ir_image(frame: OrbbeFrame) -> Image | None:
@@ -223,6 +234,19 @@ def _frame_to_ir_image(frame: OrbbeFrame) -> Image | None:
     return Image.from_numpy(frame.ir, encoding="16UC1")
 
 
+def _encode_frame(frame: OrbbeFrame, config: OrbbecConfig, seq: int) -> EncodedOutputs:
+    color_img = _frame_to_color_image(frame, config)
+    depth_img = _frame_to_depth_image(frame) if config.depth.enabled else None
+    ir_img = _frame_to_ir_image(frame) if config.ir.enabled else None
+    return EncodedOutputs(
+        seq=seq,
+        timestamp_ms=frame.timestamp_ms,
+        color=None if color_img is None else color_img.to_arrow(),
+        depth=None if depth_img is None else depth_img.to_arrow(),
+        ir=None if ir_img is None else ir_img.to_arrow(),
+    )
+
+
 def run_node(config: OrbbecConfig) -> int:
     """启动 dora 节点主循环。"""
     logger.info(
@@ -234,6 +258,36 @@ def run_node(config: OrbbecConfig) -> int:
 
     backend: CaptureBackend = create_backend(config)
     node = Node()
+
+    stop_encode = threading.Event()
+    outputs_lock = threading.Lock()
+    latest_outputs: EncodedOutputs | None = None
+    encode_error: str | None = None
+    last_sent_seq = -1
+
+    def encode_loop() -> None:
+        nonlocal latest_outputs, encode_error
+        after_seq = -1
+        while not stop_encode.is_set():
+            try:
+                frame, seq = backend.wait_new_frame(after_seq, timeout=0.5)
+            except RuntimeError as exc:
+                encode_error = str(exc)
+                stop_encode.set()
+                return
+            if seq <= after_seq:
+                continue
+            after_seq = seq
+            encoded = _encode_frame(frame, config, seq)
+            with outputs_lock:
+                latest_outputs = encoded
+
+    encode_thread = threading.Thread(
+        target=encode_loop,
+        name="orbbec-encode",
+        daemon=True,
+    )
+    encode_thread.start()
 
     logger.info(
         "[orbbec_camera] 节点启动，输出: color=%s depth=%s ir=%s",
@@ -249,35 +303,41 @@ def run_node(config: OrbbecConfig) -> int:
                     if event["id"] != "tick":
                         continue
 
-                    try:
-                        frame = backend.capture_frame()
-                    except RuntimeError as e:
-                        msg = str(e)
-                        logger.error("[orbbec_camera] 采集失败，节点退出: %s", msg)
+                    with outputs_lock:
+                        err = encode_error
+                        out = latest_outputs
+                    if err is not None:
+                        logger.error("[orbbec_camera] 采集失败，节点退出: %s", err)
                         return 1
+                    if out is None or out.seq == last_sent_seq:
+                        continue
+                    last_sent_seq = out.seq
 
-                    # Color
-                    color_img = _frame_to_color_image(frame, config)
-                    if color_img is not None:
-                        node.send_output(config.output_color, color_img.to_arrow())
+                    if out.color is not None:
+                        node.send_output(config.output_color, out.color)
                     else:
-                        logger.warning("[orbbec_camera] tick %d: Color 帧为空，跳过", frame.timestamp_ms)
+                        logger.warning(
+                            "[orbbec_camera] tick %d: Color 帧为空，跳过",
+                            out.timestamp_ms,
+                        )
 
-                    # Depth
                     if config.depth.enabled:
-                        depth_img = _frame_to_depth_image(frame)
-                        if depth_img is not None:
-                            node.send_output(config.output_depth, depth_img.to_arrow())
+                        if out.depth is not None:
+                            node.send_output(config.output_depth, out.depth)
                         else:
-                            logger.warning("[orbbec_camera] tick %d: Depth 帧为空，跳过", frame.timestamp_ms)
+                            logger.warning(
+                                "[orbbec_camera] tick %d: Depth 帧为空，跳过",
+                                out.timestamp_ms,
+                            )
 
-                    # IR
                     if config.ir.enabled:
-                        ir_img = _frame_to_ir_image(frame)
-                        if ir_img is not None:
-                            node.send_output(config.output_ir, ir_img.to_arrow())
+                        if out.ir is not None:
+                            node.send_output(config.output_ir, out.ir)
                         else:
-                            logger.warning("[orbbec_camera] tick %d: IR 帧为空，跳过", frame.timestamp_ms)
+                            logger.warning(
+                                "[orbbec_camera] tick %d: IR 帧为空，跳过",
+                                out.timestamp_ms,
+                            )
 
                 case "STOP":
                     logger.info("[orbbec_camera] 收到 Stop 事件，退出")
@@ -288,7 +348,9 @@ def run_node(config: OrbbecConfig) -> int:
                     return 1
 
     finally:
+        stop_encode.set()
         backend.close()
+        encode_thread.join(timeout=5.0)
         logger.info("[orbbec_camera] 节点已关闭")
 
     return 0
