@@ -1,5 +1,6 @@
 device_index: 0
 align_mode: disable
+capture_process: isolated
 color:
   data_flow:
     width: 640

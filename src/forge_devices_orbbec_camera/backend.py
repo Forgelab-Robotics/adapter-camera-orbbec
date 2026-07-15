@@ -110,6 +110,11 @@ def create_backend(config: OrbbecConfig) -> CaptureBackend:
     main.py 通过此函数获取 backend，从而与具体 SDK 解耦。
     替换 SDK 时只需修改 backend_orbbec.py，本函数签名不变。
     """
+    if config.capture_process == "isolated":
+        from .isolated_backend import IsolatedOrbbecBackend
+
+        return IsolatedOrbbecBackend(config)
+
     from .backend_orbbec import OrbbecBackend
 
     return OrbbecBackend(config)
