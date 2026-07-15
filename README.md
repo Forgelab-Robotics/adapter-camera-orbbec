@@ -60,6 +60,8 @@ UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视�
   `hw` 使用 SDK Config 硬件对齐，不支持时启动会明确失败
 - `frame_sync`：多设备硬件同步
 - `prewarm_frames`、`connect_delay_ms`、`init_timeout_sec`：启动行为
+- `capture_process`：`isolated` 将 pyorbbecsdk 放入独立子进程，避免与
+  Dora/Zenoh 共享文件描述符；Dora 节点推荐使用。`direct` 仅用于独立工具调试
 - `output_color`、`output_depth`、`output_ir`：稳定的 Dora topic
 
 当前不支持运行时配置更新。流 profile、设备、对齐和绝大多数控制参数需修改 YAML

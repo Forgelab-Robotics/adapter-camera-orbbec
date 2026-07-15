@@ -249,6 +249,7 @@ frame_sync: false                  # 硬件帧同步，多台摄像头同步时�
 prewarm_frames: 0                  # 启动后丢弃前N帧，消除首帧异常，范围: [0, 60]
 connect_delay_ms: 0                # 连接前等待（ms），多节点时错开USB抢占
 init_timeout_sec: 15.0             # 设备初始化超时（秒）
+capture_process: isolated          # Dora 节点推荐隔离 SDK；单独工具调试可用 direct
 
 # ── dora 输出 topic ──────────────────────────────────────────────────────────
 output_color: image/color          # Color 输出 topic

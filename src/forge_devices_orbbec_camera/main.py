@@ -14,12 +14,23 @@ CLI 子命令（不启动 dora）：
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 from dataclasses import dataclass
 
+
+def _configure_runtime_env() -> None:
+    """Disable OTEL exporters before importing Dora in node mode."""
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+    os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
+    os.environ.setdefault("OTEL_METRICS_EXPORTER", "none")
+    os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
+
+
+_configure_runtime_env()
+
 import pyarrow as pa
-from dora import Node
 from forge_common import get_logger
 from forge_msgs import CompressedImage, Image
 
@@ -256,7 +267,11 @@ def run_node(config: OrbbecConfig) -> int:
         config.align_mode,
     )
 
+    # Start isolated USB capture before creating Dora/Zenoh file descriptors.
     backend: CaptureBackend = create_backend(config)
+
+    from dora import Node  # noqa: PLC0415
+
     node = Node()
 
     stop_encode = threading.Event()
