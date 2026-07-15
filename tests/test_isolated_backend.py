@@ -16,7 +16,7 @@ from forge_devices_orbbec_camera.isolated_backend import (
 
 
 def test_capture_process_config_validation() -> None:
-    assert OrbbecConfig.from_dict({}).capture_process == "direct"
+    assert OrbbecConfig.from_dict({}).capture_process == "isolated"
     assert (
         OrbbecConfig.from_dict({"capture_process": "isolated"}).capture_process
         == "isolated"

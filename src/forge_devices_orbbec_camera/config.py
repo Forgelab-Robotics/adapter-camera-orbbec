@@ -223,7 +223,7 @@ class OrbbecConfig:
     prewarm_frames: int = 0
     connect_delay_ms: int = 0
     init_timeout_sec: float = 15.0
-    capture_process: Literal["isolated", "direct"] = "direct"
+    capture_process: Literal["isolated", "direct"] = "isolated"
 
     # dora 输出 ID（启动时生效）
     output_color: str = "image/color"
@@ -422,7 +422,7 @@ class OrbbecConfig:
         init_timeout = float(data.get("init_timeout_sec", 15.0))
         if not math.isfinite(init_timeout) or init_timeout <= 0:
             raise ValueError("init_timeout_sec 须为有限且大于 0 的数")
-        capture_process = data.get("capture_process", "direct")
+        capture_process = data.get("capture_process", "isolated")
         if capture_process not in ("isolated", "direct"):
             raise ValueError(
                 f"capture_process 须为 isolated/direct，当前: {capture_process}"
