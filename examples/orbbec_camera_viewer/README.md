@@ -3,7 +3,7 @@
 此目录保留通用 `image_viewer` 联调方式；标准交付链路和可解码测试 sink 位于
 `../dora_sensor_stream`。
 
-先从 `forge-runtime-image-viewer` 项目构建 `image_viewer`，并把该可执行文件加入
+先从 `forge-tools-image-viewer` 项目构建 `image_viewer`，并把该可执行文件加入
 `PATH`。然后从本目录运行源码节点：
 
 ```bash
