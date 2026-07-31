@@ -215,6 +215,7 @@ class OrbbecBackend:
                 if not frameset:
                     continue
                 consecutive_wait_errors = 0
+                capture_timestamp_ns = time.time_ns()
 
                 # 软件模式才使用 AlignFilter；硬件模式已由 Config.set_align_mode 配置。
                 if align_filter is not None:
@@ -228,6 +229,7 @@ class OrbbecBackend:
                     continue
 
                 frame = self._convert_frameset(frameset)
+                frame.capture_timestamp_ns = capture_timestamp_ns
                 with self._frame_cond:
                     self._latest_frame = frame
                     self._frame_seq += 1

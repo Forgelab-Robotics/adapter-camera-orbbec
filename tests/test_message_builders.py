@@ -52,6 +52,15 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertEqual(decoded.format, "jpeg")
         self.assertGreater(len(decoded.data), 0)
 
+    def test_legacy_positional_constructor_keeps_color_jpeg_position(self) -> None:
+        payload = b"\xff\xd8legacy-jpeg\xff\xd9"
+
+        frame = OrbbeFrame(None, None, None, 123, payload)
+
+        self.assertEqual(frame.timestamp_ms, 123)
+        self.assertEqual(frame.color_jpeg, payload)
+        self.assertIsNone(frame.capture_timestamp_ns)
+
     def test_jpeg_passthrough_prefers_color_jpeg_bytes(self) -> None:
         config = OrbbecConfig()
         config.color.format = "jpeg"
@@ -88,15 +97,35 @@ class MessageBuilderTests(unittest.TestCase):
             depth=np.ones((2, 3), dtype=np.float32),
             ir=np.arange(6, dtype=np.uint8).reshape(2, 3),
             timestamp_ms=42,
+            capture_timestamp_ns=1_234_567_890,
         )
 
         encoded = orbbec_main._encode_frame(frame, config, seq=7)
 
         self.assertEqual(encoded.seq, 7)
         self.assertEqual(encoded.timestamp_ms, 42)
+        self.assertEqual(encoded.capture_timestamp_ns, 1_234_567_890)
         self.assertIsNotNone(encoded.color)
         self.assertIsNotNone(encoded.depth)
         self.assertIsNotNone(encoded.ir)
+
+    def test_send_output_uses_same_optional_capture_metadata(self) -> None:
+        node = mock.Mock()
+        payloads = [mock.sentinel.color, mock.sentinel.depth, mock.sentinel.ir]
+
+        for output_id, payload in zip(("color", "depth", "ir"), payloads, strict=True):
+            orbbec_main._send_output(node, output_id, payload, 1_234_567_890)
+
+        self.assertEqual(node.send_output.call_count, 3)
+        for call in node.send_output.call_args_list:
+            self.assertEqual(call.kwargs["metadata"], {"capture_timestamp_ns": 1_234_567_890})
+
+    def test_send_output_omits_missing_capture_timestamp(self) -> None:
+        node = mock.Mock()
+
+        orbbec_main._send_output(node, "color", mock.sentinel.payload, None)
+
+        self.assertEqual(node.send_output.call_args.kwargs["metadata"], {})
 
     def test_uint8_ir_uses_mono8_image(self) -> None:
         ir = np.arange(6, dtype=np.uint8).reshape(2, 3)
@@ -308,11 +337,13 @@ class BackendLifecycleTests(unittest.TestCase):
             return expected
 
         backend._convert_frameset = mock.Mock(side_effect=convert)
-        backend._capture_loop()
+        with mock.patch.object(backend_orbbec.time, "time_ns", return_value=1_234_567_890):
+            backend._capture_loop()
 
         self.assertEqual(pipeline.wait_for_frames.call_count, 3)
         backend._convert_frameset.assert_called_once()
         self.assertIs(backend._latest_frame, expected)
+        self.assertEqual(expected.capture_timestamp_ns, 1_234_567_890)
 
 
 class ExampleDataflowTests(unittest.TestCase):

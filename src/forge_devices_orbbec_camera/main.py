@@ -206,6 +206,7 @@ class EncodedOutputs:
 
     seq: int
     timestamp_ms: int
+    capture_timestamp_ns: int | None
     color: pa.RecordBatch | None
     depth: pa.RecordBatch | None
     ir: pa.RecordBatch | None
@@ -252,9 +253,30 @@ def _encode_frame(frame: OrbbeFrame, config: OrbbecConfig, seq: int) -> EncodedO
     return EncodedOutputs(
         seq=seq,
         timestamp_ms=frame.timestamp_ms,
+        capture_timestamp_ns=frame.capture_timestamp_ns,
         color=None if color_img is None else color_img.to_arrow(),
         depth=None if depth_img is None else depth_img.to_arrow(),
         ir=None if ir_img is None else ir_img.to_arrow(),
+    )
+
+
+def _capture_metadata(capture_timestamp_ns: int | None) -> dict[str, int]:
+    """Build optional user metadata without touching Dora-managed metadata."""
+    if capture_timestamp_ns is None:
+        return {}
+    return {"capture_timestamp_ns": capture_timestamp_ns}
+
+
+def _send_output(
+    node: object,
+    output_id: str,
+    payload: pa.RecordBatch,
+    capture_timestamp_ns: int | None,
+) -> None:
+    node.send_output(  # type: ignore[attr-defined]
+        output_id,
+        payload,
+        metadata=_capture_metadata(capture_timestamp_ns),
     )
 
 
@@ -329,7 +351,12 @@ def run_node(config: OrbbecConfig) -> int:
                     last_sent_seq = out.seq
 
                     if out.color is not None:
-                        node.send_output(config.output_color, out.color)
+                        _send_output(
+                            node,
+                            config.output_color,
+                            out.color,
+                            out.capture_timestamp_ns,
+                        )
                     else:
                         logger.warning(
                             "[orbbec_camera] tick %d: Color 帧为空，跳过",
@@ -338,7 +365,12 @@ def run_node(config: OrbbecConfig) -> int:
 
                     if config.depth.enabled:
                         if out.depth is not None:
-                            node.send_output(config.output_depth, out.depth)
+                            _send_output(
+                                node,
+                                config.output_depth,
+                                out.depth,
+                                out.capture_timestamp_ns,
+                            )
                         else:
                             logger.warning(
                                 "[orbbec_camera] tick %d: Depth 帧为空，跳过",
@@ -347,7 +379,12 @@ def run_node(config: OrbbecConfig) -> int:
 
                     if config.ir.enabled:
                         if out.ir is not None:
-                            node.send_output(config.output_ir, out.ir)
+                            _send_output(
+                                node,
+                                config.output_ir,
+                                out.ir,
+                                out.capture_timestamp_ns,
+                            )
                         else:
                             logger.warning(
                                 "[orbbec_camera] tick %d: IR 帧为空，跳过",

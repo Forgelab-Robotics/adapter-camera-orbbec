@@ -30,6 +30,7 @@ class OrbbeFrame:
     - ir:     HW uint8 或 uint16，shape (H, W)。None 表示未启用或未采到。
     - timestamp_ms: 帧时间戳（毫秒），来自 SDK，用于调试和日志。
     - color_jpeg: 设备 MJPG 透传字节；与 color 互斥优先用于 jpeg 输出。
+    - capture_timestamp_ns: 后端取得该 FrameSet 时的 Unix epoch 纳秒时间；None 表示不可用。
     """
 
     color: np.ndarray | None
@@ -37,6 +38,7 @@ class OrbbeFrame:
     ir: np.ndarray | None
     timestamp_ms: int = 0
     color_jpeg: bytes | None = None
+    capture_timestamp_ns: int | None = None
 
     @property
     def color_shape(self) -> tuple[int, int] | None:

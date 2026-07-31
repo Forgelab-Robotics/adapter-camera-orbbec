@@ -76,9 +76,11 @@ UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视�
 | `image/depth` | `Image` | `32FC1`，米 |
 | `image/ir` | `Image` | `mono8`，兼容 `16UC1` |
 
-消息不附加独立设备时间戳；接收端应记录 Dora 事件接收时间。后端日志中的
-`timestamp_ms` 是 SDK 帧时间戳，仅用于诊断。`align_mode=sw/hw` 时 Depth 会投影
-到 Color 坐标系；`disable` 时各流保持原始坐标系。
+Dora 图像输出会尽力附加用户 metadata `capture_timestamp_ns`：它是采集后端取得
+该 FrameSet 时记录的 Unix epoch 纳秒时间，用于关联同一次采集的 Color / Depth /
+IR。该字段是可选的最佳估计，不替代 Dora 管理的消息时间戳；缓存、编码和发送过程
+不会重新生成它。后端日志中的 `timestamp_ms` 是 SDK 帧时间戳，仅用于诊断。
+`align_mode=sw/hw` 时 Depth 会投影到 Color 坐标系；`disable` 时各流保持原始坐标系。
 
 SDK 提供的 Depth 原始像素会结合 `get_depth_scale()` 归一为毫米，公共消息层再除以
 1000 转为米。快照 PNG 仍保存 uint16 毫米值，不能与 Dora `32FC1` 直接混用。
