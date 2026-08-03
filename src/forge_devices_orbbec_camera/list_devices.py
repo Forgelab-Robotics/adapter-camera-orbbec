@@ -55,7 +55,7 @@ def run_list_devices(*, json_output: bool = False) -> int:
         logger.info("未发现已连接的 Orbbec 设备。")
         logger.info("请检查：")
         logger.info("  1. 设备是否已通过 USB 连接")
-        logger.info("  2. 是否已执行 setup.sh 配置 udev 规则（需要 sudo）")
+        logger.info("  2. 是否已运行 init-device 或 install_permissions.sh 配置设备权限")
         logger.info("  3. 执行 udev 配置后是否重新插拔了设备")
         return 0
 

@@ -7,6 +7,7 @@
   - image/ir     IR 帧（Image mono8 或 16UC1）
 
 CLI 子命令（不启动 dora）：
+  init-device    检查并初始化 udev 规则和 video 用户组，必要时请求 PolicyKit 权限
   list-devices   列出已连接的 Orbbec 设备（可加 --json 给前端读取）
   snapshot       截单帧保存图像（默认 Color JPEG；可选用 --all-streams 写 Color/Depth/IR）
 """
@@ -38,6 +39,7 @@ from .backend import CaptureBackend, OrbbeFrame, create_backend
 from .config import OrbbecConfig
 from .list_devices import run_list_devices
 from .snapshot import resolve_snapshot_config, run_snapshot
+from .system_setup import run_init_device, runtime_preflight
 
 logger = get_logger(__name__)
 
@@ -53,6 +55,7 @@ _ROOT_DESCRIPTION = """\
 Orbbec Gemini 2 深度相机 dora 节点：在 tick 驱动下输出 Color / Depth / IR（forge_msgs.Image / CompressedImage）。
 
 【节点模式】不提供子命令时启动 dora，需配置文件。
+【设备初始化】init-device 检查环境；可信路径中的 frozen 二进制可请求固定系统配置。
 【工具子命令】list-devices / snapshot 仅操作本机相机并退出，不启动 dora。"""
 
 _ROOT_EPILOG = """\
@@ -62,6 +65,9 @@ _ROOT_EPILOG = """\
             或: ORBBEC_CAMERA_NODE_CONFIG=<YAML 绝对或相对路径> 同上
             从 YAML 读设备、分辨率、对齐方式等；向 dataflow 声明的 topic 发图。
 
+  源码初始化 sudo bash scripts/install_permissions.sh
+  部署初始化 orbbec-camera init-device
+
   枚举设备  uv run orbbec-camera list-devices
             uv run orbbec-camera list-devices --json
 
@@ -70,9 +76,10 @@ _ROOT_EPILOG = """\
             默认只存 Color JPEG；--all-streams 另存 Depth/IR。
 
 环境:
-  仅 Linux；首次部署需 udev + libusb（见 README 中 scripts/install_permissions.sh）。
+  仅 Linux；普通启动会检查运行环境，但不会自动提权。
 
 常用示例（均在本仓库根目录执行）:
+  sudo bash scripts/install_permissions.sh
   uv run orbbec-camera --config config/sensor.example.yaml
   uv run orbbec-camera list-devices
   uv run orbbec-camera snapshot -o snapshot.jpg
@@ -128,6 +135,18 @@ def _parse_args() -> argparse.Namespace:
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    init_parser = subparsers.add_parser(
+        "init-device",
+        prog="orbbec-camera init-device",
+        help="检查设备环境；可信安装路径中的 frozen 二进制可通过 PolicyKit 初始化系统配置",
+        formatter_class=_HelpFormatter,
+    )
+    init_parser.add_argument(
+        "--privileged",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     list_parser = subparsers.add_parser(
         "list-devices",
@@ -411,6 +430,9 @@ def run_node(config: OrbbecConfig) -> int:
 def main() -> int:
     args = _parse_args()
 
+    if args.command == "init-device":
+        return run_init_device(privileged=args.privileged)
+
     if args.command == "list-devices":
         return run_list_devices(json_output=args.json)
 
@@ -421,6 +443,8 @@ def main() -> int:
             device_index=args.device_index,
             device_serial=args.serial,
         )
+        if not runtime_preflight():
+            return 1
         return run_snapshot(
             cfg,
             args.output,
@@ -429,6 +453,8 @@ def main() -> int:
         )
 
     config = OrbbecConfig.load(args.config)
+    if not runtime_preflight():
+        return 1
     return run_node(config)
 
 

@@ -55,7 +55,8 @@ def _capture_worker(
         _put_status(status_queue, "ready")
         after_seq = -1
         while not stop_event.is_set():
-            frame, seq = backend.wait_new_frame(after_seq, timeout=0.5)
+            timeout = max(float(config.init_timeout_sec), 0.5) if after_seq < 0 else 0.5
+            frame, seq = backend.wait_new_frame(after_seq, timeout=timeout)
             if seq <= after_seq:
                 continue
             after_seq = seq
@@ -122,7 +123,10 @@ class IsolatedOrbbecBackend:
         if self._latest_frame is not None and self._latest_seq > after_seq:
             return self._latest_frame, self._latest_seq
 
-        deadline = time.monotonic() + max(float(timeout), 0.0)
+        effective_timeout = max(float(timeout), 0.0)
+        if after_seq < 0 and self._latest_frame is None:
+            effective_timeout = max(effective_timeout, float(self._config.init_timeout_sec))
+        deadline = time.monotonic() + effective_timeout
         while True:
             self._raise_if_worker_failed()
             remaining = deadline - time.monotonic()

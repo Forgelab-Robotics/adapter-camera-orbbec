@@ -288,7 +288,7 @@ class OrbbecBackend:
 
         if count == 0:
             raise RuntimeError(
-                "未发现 Orbbec 设备，请检查 USB 连接和 udev 规则（setup.sh）。"
+                "未发现 Orbbec 设备，请检查 USB 连接，并运行 init-device 或 install_permissions.sh 检查权限。"
             )
 
         if serial:

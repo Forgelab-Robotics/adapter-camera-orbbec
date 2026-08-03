@@ -60,6 +60,14 @@ _node_dir = os.path.dirname(_spec_dir)
 _src_dir = os.path.join(_node_dir, "src")
 
 _orbbec_bins = _collect_pyorbbec_binaries()
+_rule = os.path.join(
+    _src_dir,
+    "forge_devices_orbbec_camera",
+    "resources",
+    "99-obsensor-libusb.rules",
+)
+if not os.path.isfile(_rule):
+    raise SystemExit(f"PyInstaller: 未找到内嵌 udev 规则: {_rule}")
 _rthook = os.path.join(
     _src_dir, "forge_devices_orbbec_camera", "pyi_rthook_orbbec.py"
 )
@@ -68,7 +76,7 @@ a = Analysis(
     [os.path.join(_spec_dir, "pyinstaller_entry.py")],
     pathex=[_src_dir],
     binaries=_orbbec_bins,
-    datas=[],
+    datas=[(_rule, "forge_devices_orbbec_camera/resources")],
     hiddenimports=[
         "pyorbbecsdk",
         "forge_devices_orbbec_camera.backend_orbbec",

@@ -16,13 +16,32 @@ src layout：`src/forge_devices_orbbec_camera`。
 ```bash
 uv sync
 uv run python scripts/check_environment.py
-sudo bash scripts/install_permissions.sh
+sudo bash scripts/install_permissions.sh  # 仅首次源码部署需要
 ```
 
-权限脚本安装 Debian/Ubuntu 的 `libusb-1.0-0` 运行时和
-`scripts/udev/99-obsensor-libusb.rules`。规则使用 `0660`、`video` 组和
-`uaccess`；依赖安装失败时脚本会非零退出。其他发行版需自行安装等价运行时。
-执行后重新插拔设备。源码构建 SDK 时才需要 `libusb-1.0-0-dev`。
+普通 Dora 节点和 `snapshot` 启动时会检查 `libusb`、内嵌 udev 规则版本、`video`
+用户组、冲突规则和当前 Orbbec USB 节点权限；检查失败会输出处理建议，但不会自动弹出
+提权窗口。
+
+`init-device` 是部署后二进制的短检查和初始化命令。环境已就绪时直接退出且不提权；需要
+安装规则或配置用户组时才请求授权。为避免 `pkexec` 以 root 重新执行普通用户
+可修改的代码，它只允许 **frozen 二进制位于 root-owned、且整条父目录链均不可由
+组/其他用户写入的安装路径** 时请求 PolicyKit。不要直接对构建目录中的
+`dist/orbbec_camera` 使用自动提权；先由管理员安装，再由实际相机用户运行：
+
+```bash
+sudo install -o root -g root -m 0755 dist/orbbec_camera /usr/local/bin/orbbec-camera
+orbbec-camera init-device
+```
+
+privileged helper 只原子安装固定内嵌规则、将 `PKEXEC_UID` 对应的普通用户加入 `video`
+组并 reload udev；不会调用包管理器，也不会删除检测到的其他 Orbbec udev 规则。完成后
+需重新插拔设备，并注销后重新登录以刷新用户组。
+
+`sudo bash scripts/install_permissions.sh` 是源码部署的显式管理员入口，会安装
+Debian/Ubuntu 的 `libusb-1.0-0`、同一份规则，并根据 `SUDO_USER` 将实际调用用户加入
+`video` 组。其他发行版需自行安装等价 libusb 运行时；源码构建 SDK 时才需要
+`libusb-1.0-0-dev`。
 
 官方工具验证应先使用 Orbbec Viewer 或 SDK 官方示例确认设备、固件、流 profile
 和深度工作模式，再运行本项目。
@@ -30,8 +49,9 @@ sudo bash scripts/install_permissions.sh
 ## 基础命令
 
 ```bash
-# CLI 帮助（不访问硬件）
+# CLI 帮助
 uv run orbbec-camera --help
+# 源码首次初始化见上方 install_permissions.sh；已安装的 frozen 二进制使用 init-device
 
 # 列举设备
 uv run orbbec-list-devices
@@ -92,13 +112,17 @@ bash scripts/build_pyinstaller.sh
 ```
 
 产物为 `dist/orbbec_camera`。spec 会从已安装的 wheel 收集
-`libOrbbecSDK.so*`、Python 扩展和 `extensions/`，运行时 hook 设置 bundle 内动态库
-搜索路径。构建脚本使用 `uv.lock`、`[tool.uv.sources]` 和隔离的 `.venv_build`
+`libOrbbecSDK.so*`、Python 扩展、`extensions/` 和固定 udev 规则，运行时 hook 设置
+bundle 内动态库搜索路径。安装到上述可信系统路径后可执行 `init-device`；构建目录中的
+用户自有产物会拒绝自动提权，这是预期安全行为。构建脚本
+使用 `uv.lock`、`[tool.uv.sources]` 和隔离的 `.venv_build`
 同步依赖；锁文件过期会直接失败。构建机和目标机必须使用兼容架构与 libc。
 
 ## 常见问题
 
-- 未发现设备：检查 USB、运行权限脚本并重新插拔。
+- 未发现设备：运行已安装二进制的 `orbbec-camera init-device`，或直接启动相机查看 preflight；根据 ACTION 安装规则/配置用户组，重新插拔并重新登录。
+- 检测到其他包含 vendor `2bc5` 的 udev 规则：由管理员核对规则优先级和权限；工具只报告，
+  不会自动删除系统规则。
 - `libusb`/动态库加载失败：运行 `scripts/check_environment.py`，确认系统运行时和
   wheel 架构匹配。
 - `uvc_open` 失败或设备忙：确认没有残留采集进程；必要时正常结束旧进程并重新插拔。

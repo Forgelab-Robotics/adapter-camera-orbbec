@@ -11,6 +11,7 @@ from forge_devices_orbbec_camera.backend import OrbbeFrame
 from forge_devices_orbbec_camera.config import OrbbecConfig
 from forge_devices_orbbec_camera.isolated_backend import (
     IsolatedOrbbecBackend,
+    _capture_worker,
     _put_latest,
 )
 
@@ -50,6 +51,54 @@ def test_put_latest_drops_oldest_packet() -> None:
     seq, frame = frame_queue.get_nowait()
     assert seq == 3
     assert frame is newest
+
+
+def test_capture_worker_uses_init_timeout_for_first_frame() -> None:
+    config = OrbbecConfig(init_timeout_sec=3.0)
+    expected = OrbbeFrame(color=None, depth=None, ir=None, timestamp_ms=1)
+    capture_backend = mock.Mock()
+    capture_backend.wait_new_frame.return_value = (expected, 1)
+    frame_queue: queue.Queue = queue.Queue(maxsize=2)
+    status_queue: queue.Queue = queue.Queue(maxsize=8)
+    stop_event = mock.Mock()
+    stop_event.is_set.side_effect = [False, True]
+
+    with mock.patch(
+        "forge_devices_orbbec_camera.backend_orbbec.OrbbecBackend",
+        return_value=capture_backend,
+    ):
+        _capture_worker(config, frame_queue, status_queue, stop_event)
+
+    capture_backend.wait_new_frame.assert_called_once_with(-1, timeout=3.0)
+    capture_backend.close.assert_called_once_with()
+    assert status_queue.get_nowait() == ("ready", "")
+    seq, frame = frame_queue.get_nowait()
+    assert seq == 1
+    assert frame is expected
+
+
+def test_proxy_expands_short_timeout_while_waiting_for_first_frame() -> None:
+    isolated = IsolatedOrbbecBackend.__new__(IsolatedOrbbecBackend)
+    isolated._config = OrbbecConfig(init_timeout_sec=3.0)
+    isolated._latest_frame = None
+    isolated._latest_seq = -1
+    isolated._closed = False
+    isolated._frame_queue = mock.Mock()
+    isolated._frame_queue.get_nowait.side_effect = queue.Empty
+    isolated._frame_queue.get.side_effect = queue.Empty
+    isolated._status_queue = mock.Mock()
+    isolated._status_queue.get_nowait.side_effect = queue.Empty
+    isolated._process = mock.Mock()
+    isolated._process.is_alive.return_value = True
+
+    with mock.patch(
+        "forge_devices_orbbec_camera.isolated_backend.time.monotonic",
+        side_effect=[0.0, 0.6, 3.1],
+    ):
+        with pytest.raises(RuntimeError, match="首帧超时"):
+            isolated.wait_new_frame(-1, timeout=0.5)
+
+    isolated._frame_queue.get.assert_called_once_with(timeout=0.2)
 
 
 def test_wait_new_frame_returns_newest_sequence() -> None:

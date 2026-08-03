@@ -163,6 +163,12 @@ class MessageBuilderTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_removed_doctor_subcommand_is_rejected(self) -> None:
+        with mock.patch.object(orbbec_main.sys, "argv", ["orbbec-camera", "doctor"]):
+            with self.assertRaises(SystemExit) as error:
+                orbbec_main._parse_args()
+        self.assertEqual(error.exception.code, 2)
+
     def test_standard_example_loads(self) -> None:
         config = OrbbecConfig.from_yaml_path(PACKAGE_ROOT / "config" / "sensor.example.yaml")
         self.assertGreater(config.color.width, 0)
@@ -370,15 +376,32 @@ class ExampleDataflowTests(unittest.TestCase):
         self.assertIn("--no-default-groups", build_script)
         self.assertNotIn("uv pip install", build_script)
 
-        rules = (PACKAGE_ROOT / "scripts" / "udev" / "99-obsensor-libusb.rules").read_text()
+        legacy_rules = PACKAGE_ROOT / "scripts" / "udev" / "99-obsensor-libusb.rules"
+        canonical_rules = (
+            PACKAGE_ROOT
+            / "src"
+            / "forge_devices_orbbec_camera"
+            / "resources"
+            / "99-obsensor-libusb.rules"
+        )
+        self.assertEqual(legacy_rules.resolve(), canonical_rules.resolve())
+        rules = canonical_rules.read_text()
         self.assertNotIn('MODE:="0666"', rules)
         self.assertIn('MODE:="0660"', rules)
         self.assertIn('GROUP:="video"', rules)
         self.assertIn('TAG+="uaccess"', rules)
 
         setup = (PACKAGE_ROOT / "scripts" / "setup.sh").read_text()
-        self.assertRegex(setup, r"apt-get install.*\\n.*if !|if ! DEBIAN_FRONTEND")
+        self.assertRegex(setup, r"apt-get install.*\n.*if !|if ! DEBIAN_FRONTEND")
         self.assertIn("exit 1", setup)
+
+        spec = (PACKAGE_ROOT / "scripts" / "orbbec_camera.spec").read_text()
+        self.assertIn("99-obsensor-libusb.rules", spec)
+        self.assertIn("forge_devices_orbbec_camera/resources", spec)
+        entry = (PACKAGE_ROOT / "scripts" / "pyinstaller_entry.py").read_text()
+        self.assertIn("multiprocessing.freeze_support()", entry)
+        project = (PACKAGE_ROOT / "pyproject.toml").read_text()
+        self.assertIn('forge_devices_orbbec_camera = ["resources/*.rules"]', project)
 
         backend_source = (
             PACKAGE_ROOT / "src" / "forge_devices_orbbec_camera" / "backend_orbbec.py"
