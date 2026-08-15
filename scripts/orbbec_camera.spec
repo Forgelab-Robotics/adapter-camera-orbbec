@@ -71,12 +71,22 @@ if not os.path.isfile(_rule):
 _rthook = os.path.join(
     _src_dir, "forge_devices_orbbec_camera", "pyi_rthook_orbbec.py"
 )
+_license_bundle = os.path.join(
+    _node_dir, "build", "pyinstaller", "THIRD_PARTY_LICENSES.txt"
+)
+if not os.path.isfile(_license_bundle):
+    raise SystemExit(
+        f"PyInstaller: 未找到许可证清单: {_license_bundle}；请使用 build_pyinstaller.sh 构建。"
+    )
 
 a = Analysis(
     [os.path.join(_spec_dir, "pyinstaller_entry.py")],
     pathex=[_src_dir],
     binaries=_orbbec_bins,
-    datas=[(_rule, "forge_devices_orbbec_camera/resources")],
+    datas=[
+        (_rule, "forge_devices_orbbec_camera/resources"),
+        (_license_bundle, "."),
+    ],
     hiddenimports=[
         "pyorbbecsdk",
         "forge_devices_orbbec_camera.backend_orbbec",

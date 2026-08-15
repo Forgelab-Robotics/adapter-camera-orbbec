@@ -15,6 +15,13 @@ from typing import Any, Literal
 import yaml
 
 
+_MAX_STREAM_DIMENSION = 16_384
+_MAX_STREAM_PIXELS = 33_554_432  # 8192 x 4096，宽松覆盖 8K 级设备
+_MAX_STREAM_FPS = 1_000
+_MAX_CONNECT_DELAY_MS = 3_600_000
+_MAX_INIT_TIMEOUT_SEC = 3_600.0
+
+
 @dataclass
 class ColorStreamConfig:
     """Color 流配置（对应 UI「Color」数据流 + 控制两块）。"""
@@ -235,11 +242,37 @@ class OrbbecConfig:
         def _opt_int(v: Any) -> int | None:
             return int(v) if v is not None else None
 
-        def _positive_int(name: str, value: Any) -> int:
+        def _positive_int(name: str, value: Any, *, maximum: int | None = None) -> int:
             parsed = int(value)
             if parsed <= 0:
                 raise ValueError(f"{name} 须大于 0")
+            if maximum is not None and parsed > maximum:
+                raise ValueError(f"{name} 须不大于 {maximum}")
             return parsed
+
+        def _bool(name: str, value: Any) -> bool:
+            if type(value) is not bool:
+                raise ValueError(f"{name} 须为真正的 bool（true/false）")
+            return value
+
+        def _stream_geometry(
+            stream: str,
+            width_value: Any,
+            height_value: Any,
+            fps_value: Any,
+        ) -> tuple[int, int, int]:
+            width = _positive_int(
+                f"{stream}.width", width_value, maximum=_MAX_STREAM_DIMENSION
+            )
+            height = _positive_int(
+                f"{stream}.height", height_value, maximum=_MAX_STREAM_DIMENSION
+            )
+            fps = _positive_int(f"{stream}.fps", fps_value, maximum=_MAX_STREAM_FPS)
+            if width * height > _MAX_STREAM_PIXELS:
+                raise ValueError(
+                    f"{stream}.width * {stream}.height 须不大于 {_MAX_STREAM_PIXELS}"
+                )
+            return width, height, fps
 
         def _color(d: dict[str, Any]) -> ColorStreamConfig:
             raw = d.get("color", {}) or {}
@@ -258,18 +291,28 @@ class OrbbecConfig:
             plf = _opt_int(ctrl.get("power_line_frequency"))
             if plf is not None and plf not in (0, 1, 2):
                 raise ValueError("color.power_line_frequency 须为 0/1/2")
+            width, height, fps = _stream_geometry(
+                "color",
+                df.get("width", 640),
+                df.get("height", 480),
+                df.get("fps", 30),
+            )
             return ColorStreamConfig(
-                width=_positive_int("color.width", df.get("width", 640)),
-                height=_positive_int("color.height", df.get("height", 480)),
-                fps=_positive_int("color.fps", df.get("fps", 30)),
+                width=width,
+                height=height,
+                fps=fps,
                 format=fmt,
                 jpeg_quality=jq,
-                mirror=bool(ctrl.get("mirror", False)),
-                flip=bool(ctrl.get("flip", False)),
+                mirror=_bool("color.mirror", ctrl.get("mirror", False)),
+                flip=_bool("color.flip", ctrl.get("flip", False)),
                 rotate=rotate,
-                auto_white_balance=bool(ctrl.get("auto_white_balance", True)),
+                auto_white_balance=_bool(
+                    "color.auto_white_balance", ctrl.get("auto_white_balance", True)
+                ),
                 white_balance=_opt_int(ctrl.get("white_balance")),
-                auto_exposure=bool(ctrl.get("auto_exposure", True)),
+                auto_exposure=_bool(
+                    "color.auto_exposure", ctrl.get("auto_exposure", True)
+                ),
                 exposure_us=_opt_int(ctrl.get("exposure_us")),
                 gain=_opt_int(ctrl.get("gain")),
                 brightness=_opt_int(ctrl.get("brightness", 52)),
@@ -308,7 +351,7 @@ class OrbbecConfig:
                 v = c[key]
                 if v is None:
                     return None
-                return bool(v)
+                return _bool(f"depth.{key}", v)
 
             def _opt_float(v: Any) -> float | None:
                 return float(v) if v is not None else None
@@ -322,48 +365,66 @@ class OrbbecConfig:
             if hfm not in valid_hfm:
                 raise ValueError(f"hole_fill_mode 须为 {valid_hfm}，当前: {hfm}")
 
+            width, height, fps = _stream_geometry(
+                "depth",
+                c.get("width", 640),
+                c.get("height", 400),
+                c.get("fps", 30),
+            )
             return DepthStreamConfig(
-                enabled=bool(c.get("enabled", True)),
-                width=_positive_int("depth.width", c.get("width", 640)),
-                height=_positive_int("depth.height", c.get("height", 400)),
-                fps=_positive_int("depth.fps", c.get("fps", 30)),
+                enabled=_bool("depth.enabled", c.get("enabled", True)),
+                width=width,
+                height=height,
+                fps=fps,
                 format=dfmt,
                 depth_work_mode=dwm,
                 depth_unit=depth_unit,
                 min_mm=min_mm,
                 max_mm=max_mm,
-                auto_exposure=bool(c.get("auto_exposure", True)),
+                auto_exposure=_bool(
+                    "depth.auto_exposure", c.get("auto_exposure", True)
+                ),
                 exposure=_opt_int(c.get("exposure")),
                 gain=_opt_int(c.get("gain")),
-                noise_removal_filter=bool(c.get("noise_removal_filter", True)),
+                noise_removal_filter=_bool(
+                    "depth.noise_removal_filter", c.get("noise_removal_filter", True)
+                ),
                 noise_removal_max_diff=_opt_int(c.get("noise_removal_max_diff")),
                 noise_removal_max_speckle=_opt_int(c.get("noise_removal_max_speckle")),
-                hole_filter=bool(c.get("hole_filter", False)),
+                hole_filter=_bool("depth.hole_filter", c.get("hole_filter", False)),
                 precision_level=pl,
-                disparity_to_depth=bool(c.get("disparity_to_depth", True)),
+                disparity_to_depth=_bool(
+                    "depth.disparity_to_depth", c.get("disparity_to_depth", True)
+                ),
                 post_filter=_opt_bool("post_filter"),
                 soft_filter=_opt_bool("soft_filter"),
                 soft_filter_max_diff=_opt_int(c.get("soft_filter_max_diff")),
                 soft_filter_max_speckle=_opt_int(c.get("soft_filter_max_speckle")),
                 rm_filter=_opt_bool("rm_filter"),
-                edge_filter=bool(c.get("edge_filter", False)),
+                edge_filter=_bool("depth.edge_filter", c.get("edge_filter", False)),
                 edge_margin_x_th=_opt_int(c.get("edge_margin_x_th")),
                 edge_margin_y_th=_opt_int(c.get("edge_margin_y_th")),
                 edge_limit_x_th=_opt_int(c.get("edge_limit_x_th")),
                 edge_limit_y_th=_opt_int(c.get("edge_limit_y_th")),
                 edge_vertical_direction=_opt_bool("edge_vertical_direction"),
-                spatial_filter=bool(c.get("spatial_filter", False)),
+                spatial_filter=_bool(
+                    "depth.spatial_filter", c.get("spatial_filter", False)
+                ),
                 spatial_alpha=_opt_float(c.get("spatial_alpha")),
                 spatial_disp_diff=_opt_int(c.get("spatial_disp_diff")),
                 spatial_magnitude=_opt_int(c.get("spatial_magnitude")),
                 spatial_radius=_opt_int(c.get("spatial_radius")),
-                temporal_filter=bool(c.get("temporal_filter", False)),
+                temporal_filter=_bool(
+                    "depth.temporal_filter", c.get("temporal_filter", False)
+                ),
                 temporal_diff_scale=_opt_float(c.get("temporal_diff_scale")),
                 temporal_weight=_opt_float(c.get("temporal_weight")),
-                hole_fill_filter=bool(c.get("hole_fill_filter", False)),
+                hole_fill_filter=_bool(
+                    "depth.hole_fill_filter", c.get("hole_fill_filter", False)
+                ),
                 hole_fill_mode=hfm,
-                mirror=bool(c.get("mirror", False)),
-                flip=bool(c.get("flip", False)),
+                mirror=_bool("depth.mirror", c.get("mirror", False)),
+                flip=_bool("depth.flip", c.get("flip", False)),
                 rotate=rotate,
             )
 
@@ -382,16 +443,24 @@ class OrbbecConfig:
             cds = _opt_int(ctrl.get("channel_data_source"))
             if cds is not None and cds not in (0, 1):
                 raise ValueError("ir.channel_data_source 须为 0 或 1")
+            width, height, fps = _stream_geometry(
+                "ir",
+                df.get("width", 640),
+                df.get("height", 400),
+                df.get("fps", 30),
+            )
             return IrStreamConfig(
-                enabled=bool(df.get("enabled", True)),
-                width=_positive_int("ir.width", df.get("width", 640)),
-                height=_positive_int("ir.height", df.get("height", 400)),
-                fps=_positive_int("ir.fps", df.get("fps", 30)),
+                enabled=_bool("ir.enabled", df.get("enabled", True)),
+                width=width,
+                height=height,
+                fps=fps,
                 format=fmt,
-                mirror=bool(ctrl.get("mirror", False)),
-                flip=bool(ctrl.get("flip", False)),
+                mirror=_bool("ir.mirror", ctrl.get("mirror", False)),
+                flip=_bool("ir.flip", ctrl.get("flip", False)),
                 rotate=rotate,
-                auto_exposure=bool(ctrl.get("auto_exposure", True)),
+                auto_exposure=_bool(
+                    "ir.auto_exposure", ctrl.get("auto_exposure", True)
+                ),
                 exposure_us=_opt_int(ctrl.get("exposure_us")),
                 gain=_opt_int(ctrl.get("gain")),
                 channel_data_source=cds,
@@ -403,9 +472,9 @@ class OrbbecConfig:
             if pl is not None and not (0 <= pl <= 5):
                 raise ValueError("laser.power_level 须在 [0, 5]")
             return LaserConfig(
-                enabled=bool(c.get("enabled", True)),
+                enabled=_bool("laser.enabled", c.get("enabled", True)),
                 power_level=pl,
-                ldp_enabled=bool(c.get("ldp_enabled", True)),
+                ldp_enabled=_bool("laser.ldp_enabled", c.get("ldp_enabled", True)),
             )
 
         align_mode = data.get("align_mode", "disable")
@@ -417,11 +486,19 @@ class OrbbecConfig:
             raise ValueError("prewarm_frames 须在 [0, 60]")
 
         connect_delay = int(data.get("connect_delay_ms", 0))
-        if connect_delay < 0:
-            raise ValueError("connect_delay_ms 不能为负数")
+        if not (0 <= connect_delay <= _MAX_CONNECT_DELAY_MS):
+            raise ValueError(
+                f"connect_delay_ms 须在 [0, {_MAX_CONNECT_DELAY_MS}]"
+            )
         init_timeout = float(data.get("init_timeout_sec", 15.0))
-        if not math.isfinite(init_timeout) or init_timeout <= 0:
-            raise ValueError("init_timeout_sec 须为有限且大于 0 的数")
+        if (
+            not math.isfinite(init_timeout)
+            or init_timeout <= 0
+            or init_timeout > _MAX_INIT_TIMEOUT_SEC
+        ):
+            raise ValueError(
+                f"init_timeout_sec 须为 (0, {_MAX_INIT_TIMEOUT_SEC}] 内的有限数"
+            )
         capture_process = data.get("capture_process", "isolated")
         if capture_process not in ("isolated", "direct"):
             raise ValueError(
@@ -440,7 +517,7 @@ class OrbbecConfig:
             ir=_ir(data),
             laser=_laser(data),
             align_mode=align_mode,
-            frame_sync=bool(data.get("frame_sync", False)),
+            frame_sync=_bool("frame_sync", data.get("frame_sync", False)),
             prewarm_frames=prewarm,
             connect_delay_ms=connect_delay,
             init_timeout_sec=init_timeout,

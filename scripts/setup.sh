@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Explicit administrator setup for source deployments.
-# Installs the runtime libusb package on Debian/Ubuntu, the fixed udev rule,
-# and configures the actual invoking user for the video group.
+# Installs the fixed udev rule and configures the actual invoking user for the
+# video group. The system libusb runtime must already be installed.
 #
 # Usage:
 #   sudo bash scripts/install_permissions.sh
 
 set -Eeuo pipefail
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+unset BASH_ENV ENV CDPATH GLOBIGNORE LD_PRELOAD LD_AUDIT PYTHONPATH PYTHONHOME || true
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RULES_SRC="$SCRIPT_DIR/udev/99-obsensor-libusb.rules"
+RULES_SRC="$SCRIPT_DIR/../src/forge_devices_orbbec_camera/resources/99-obsensor-libusb.rules"
+EXPECTED_RULES_SHA256="3e5b10c65c292ee40f337e11b1c04ec5635e0fdc60bc66e63810e5ca06860fa3"
 RULES_DIR="/etc/udev/rules.d"
 RULES_DEST="$RULES_DIR/99-obsensor-libusb.rules"
 TEMP_RULE=""
@@ -60,8 +66,17 @@ if ! getent group video >/dev/null 2>&1; then
     echo "[setup] 错误：系统不存在 video 用户组，请先由管理员确认系统用户组策略。" >&2
     exit 1
 fi
-if [ ! -f "$RULES_SRC" ]; then
-    echo "[setup] 错误：未找到固定规则 $RULES_SRC" >&2
+if [ ! -f "$RULES_SRC" ] || [ -L "$RULES_SRC" ]; then
+    echo "[setup] 错误：固定规则必须是普通文件且不能是符号链接：$RULES_SRC" >&2
+    exit 1
+fi
+if grep -Eiq '(^|,)[[:space:]]*(RUN|PROGRAM|IMPORT)[{+:=]' "$RULES_SRC"; then
+    echo "[setup] 错误：udev 规则不得包含 RUN、PROGRAM 或 IMPORT 指令。" >&2
+    exit 1
+fi
+rules_sha256="$(sha256sum -- "$RULES_SRC" | cut -d ' ' -f1)"
+if [ "$rules_sha256" != "$EXPECTED_RULES_SHA256" ]; then
+    echo "[setup] 错误：udev 规则校验失败；请使用已审核版本。" >&2
     exit 1
 fi
 
@@ -126,22 +141,15 @@ if [ "${#CONFLICTS[@]}" -gt 0 ]; then
     exit 1
 fi
 
-# This explicit source/admin path keeps the historical Debian/Ubuntu convenience.
-# The frozen `init-device` command never invokes a package manager.
-if command -v apt-get >/dev/null 2>&1; then
-    echo "[setup] apt-get install -y libusb-1.0-0"
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y libusb-1.0-0; then
-        echo "[setup] 错误：apt 安装 libusb 失败，包管理器可能已经部分修改系统。" >&2
-        echo "[setup] 请先检查 apt/dpkg 状态；可尝试 sudo dpkg --configure -a 和 sudo apt --fix-broken install。" >&2
-        exit 1
-    fi
-    COMPLETED_STEPS+=("已确认 libusb-1.0-0 运行时")
-else
-    echo "[setup] 未检测到 apt-get，跳过 libusb 安装；请按发行版自行安装 libusb 运行时。"
-fi
+echo "[setup] 本脚本不会调用包管理器；请事先安装发行版提供的 libusb 运行时。"
 
 TEMP_RULE="$(mktemp "$RULES_DIR/.99-obsensor-libusb.rules.XXXXXX")"
 install -o root -g root -m 0644 "$RULES_SRC" "$TEMP_RULE"
+temp_sha256="$(sha256sum -- "$TEMP_RULE" | cut -d ' ' -f1)"
+if [ "$temp_sha256" != "$EXPECTED_RULES_SHA256" ]; then
+    echo "[setup] 错误：临时 udev 规则校验失败。" >&2
+    exit 1
+fi
 mv -fT -- "$TEMP_RULE" "$RULES_DEST"
 TEMP_RULE=""
 COMPLETED_STEPS+=("已原子安装 $RULES_DEST")

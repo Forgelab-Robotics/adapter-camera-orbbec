@@ -94,6 +94,19 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _effective_rule_lines(data: bytes) -> tuple[str, ...] | None:
+    """Return active udev directives, ignoring comments and blank lines."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return tuple(
+        line
+        for raw_line in text.splitlines()
+        if (line := raw_line.strip()) and not line.startswith("#")
+    )
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="ascii").strip().lower()
@@ -211,7 +224,10 @@ def inspect_device_setup(
         platform_supported=sys.platform.startswith("linux"),
         libusb_found=ctypes.util.find_library("usb-1.0") is not None,
         rule_installed=installed_rule is not None,
-        rule_matches=installed_rule == expected_rule,
+        rule_matches=(
+            installed_rule is not None
+            and _effective_rule_lines(installed_rule) == _effective_rule_lines(expected_rule)
+        ),
         rule_secure=installed_rule is not None and security_issue is None,
         rule_security_issue=security_issue,
         rule_expected_sha256=expected_sha256,

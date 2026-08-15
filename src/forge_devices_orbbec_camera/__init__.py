@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["DeviceInfo", "OrbbeFrame", "OrbbecConfig"]
+__version__ = "1.0.1"
+
+__all__ = ["DeviceInfo", "OrbbeFrame", "OrbbecConfig", "__version__"]
 
 
 def __getattr__(name: str) -> Any:

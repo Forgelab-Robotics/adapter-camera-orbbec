@@ -35,6 +35,7 @@ import pyarrow as pa
 from forge_common import get_logger
 from forge_msgs import CompressedImage, Image
 
+from . import __version__
 from .backend import CaptureBackend, OrbbeFrame, create_backend
 from .config import OrbbecConfig
 from .list_devices import run_list_devices
@@ -56,7 +57,7 @@ Orbbec Gemini 2 深度相机 dora 节点：在 tick 驱动下输出 Color / Dept
 
 【节点模式】不提供子命令时启动 dora，需配置文件。
 【设备初始化】init-device 检查环境；可信路径中的 frozen 二进制可请求固定系统配置。
-【工具子命令】list-devices / snapshot 仅操作本机相机并退出，不启动 dora。"""
+【工具子命令】list-devices / snapshot 仅操作本机相机并退出；licenses 显示内嵌许可证。"""
 
 _ROOT_EPILOG = """\
 运行模式说明:
@@ -70,6 +71,8 @@ _ROOT_EPILOG = """\
 
   枚举设备  uv run orbbec-camera list-devices
             uv run orbbec-camera list-devices --json
+
+  查看许可  uv run orbbec-camera licenses
 
   截帧落盘  uv run orbbec-camera snapshot ...
             uv run orbbec-camera snapshot --config <YAML> ...
@@ -127,6 +130,11 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=_HelpFormatter,
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default=None,
@@ -146,6 +154,13 @@ def _parse_args() -> argparse.Namespace:
         "--privileged",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+
+    subparsers.add_parser(
+        "licenses",
+        prog="orbbec-camera licenses",
+        help="显示项目和第三方依赖许可证并退出",
+        formatter_class=_HelpFormatter,
     )
 
     list_parser = subparsers.add_parser(
@@ -427,11 +442,46 @@ def run_node(config: OrbbecConfig) -> int:
     return 0
 
 
+def _print_licenses() -> int:
+    """Print the license bundle embedded by the release build."""
+    from pathlib import Path
+
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root is not None:
+        candidates = [Path(frozen_root) / "THIRD_PARTY_LICENSES.txt"]
+    else:
+        project_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            project_root / "build" / "pyinstaller" / "THIRD_PARTY_LICENSES.txt",
+            project_root / "LICENSE",
+        ]
+        try:
+            from importlib.metadata import PackageNotFoundError, distribution
+
+            package_distribution = distribution("forge-devices-orbbec-camera")
+            for entry in package_distribution.files or ():
+                entry_text = str(entry).replace("\\", "/")
+                if entry_text.endswith(".dist-info/licenses/LICENSE"):
+                    candidates.append(Path(package_distribution.locate_file(entry)))
+        except PackageNotFoundError:
+            pass
+
+    for candidate in candidates:
+        if candidate.is_file():
+            print(candidate.read_text(encoding="utf-8"), end="")
+            return 0
+    print("License information is unavailable in this installation.", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     args = _parse_args()
 
     if args.command == "init-device":
         return run_init_device(privileged=args.privileged)
+
+    if args.command == "licenses":
+        return _print_licenses()
 
     if args.command == "list-devices":
         return run_list_devices(json_output=args.json)

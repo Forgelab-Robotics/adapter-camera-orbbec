@@ -1,28 +1,48 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-devices-orbbec-camera"
-version = "1.0.0"
-description = "Orbbec Gemini 2 depth camera dora node"
+version = "1.0.1"
+description = "Linux Orbbec Gemini 2 depth camera capture and Dora streaming node."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "X-ERA" },
+]
+keywords = ["camera", "depth-camera", "orbbec", "dora", "robotics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Multimedia :: Video :: Capture",
+]
 dependencies = [
     "dora-rs==0.4.1",
-    "forge-common",
-    "forge-msgs",
-    "pyorbbecsdk2>=2.0.18",
-    "numpy",
-    "opencv-python",
-    "pyyaml>=6.0",
+    "forge-common==1.0.1",
+    "forge-msgs==1.0.1",
+    "pyorbbecsdk2>=2.0.18,<3",
+    "numpy>=1.26,<3",
+    "opencv-python>=4.8,<6",
+    "pyyaml>=6.0,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Forgelab-Robotics/adapter-camera-orbbec"
+Repository = "https://github.com/Forgelab-Robotics/adapter-camera-orbbec"
+Documentation = "https://github.com/Forgelab-Robotics/adapter-camera-orbbec#readme"
+Issues = "https://github.com/Forgelab-Robotics/adapter-camera-orbbec/issues"
 
 [dependency-groups]
 dev = [
     "pytest",
 ]
 build = [
+    "pip-licenses>=5,<6",
     "pyinstaller",
 ]
 
@@ -32,9 +52,6 @@ orbbec_camera = "forge_devices_orbbec_camera.main:main"
 orbbec-list-devices = "forge_devices_orbbec_camera.list_devices:main"
 orbbec-probe-device = "forge_devices_orbbec_camera.probe_device:main"
 
-[tool.uv.sources]
-forge-common = { git = "https://gitlab.ex-ai.cn/meta-emt/framework/forge.git", rev = "dev", subdirectory = "packages/common" }
-forge-msgs = { git = "https://gitlab.ex-ai.cn/meta-emt/framework/forge.git", rev = "dev", subdirectory = "packages/msgs" }
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -12,11 +12,23 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 from forge_devices_orbbec_camera.backend import OrbbeFrame
 from forge_devices_orbbec_camera.config import OrbbecConfig
+from forge_devices_orbbec_camera import __version__
 from forge_devices_orbbec_camera import main as orbbec_main
 from forge_devices_orbbec_camera import backend_orbbec
 
 
 class MessageBuilderTests(unittest.TestCase):
+    def test_version_matches_project_metadata(self) -> None:
+        import tomllib
+
+        metadata = tomllib.loads((PACKAGE_ROOT / "pyproject.toml").read_text())
+        self.assertEqual(__version__, metadata["project"]["version"])
+
+    def test_source_license_command_prints_apache_license(self) -> None:
+        with mock.patch("builtins.print") as output:
+            self.assertEqual(orbbec_main._print_licenses(), 0)
+        self.assertIn("Apache License", output.call_args.args[0])
+
     def test_rgb_color_uses_raw_image(self) -> None:
         config = OrbbecConfig()
         frame = OrbbeFrame(
@@ -187,6 +199,126 @@ class ConfigTests(unittest.TestCase):
         for timeout in (float("inf"), float("-inf"), float("nan")):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "init_timeout_sec"):
                 OrbbecConfig.from_dict({"init_timeout_sec": timeout})
+
+    def test_rejects_string_values_for_boolean_fields(self) -> None:
+        invalid_cases = [
+            ("frame_sync", {"frame_sync": "false"}),
+            (
+                "color.mirror",
+                {"color": {"control": {"mirror": "true"}}},
+            ),
+            (
+                "color.auto_exposure",
+                {"color": {"control": {"auto_exposure": "false"}}},
+            ),
+            ("depth.enabled", {"depth": {"enabled": "true"}}),
+            (
+                "depth.noise_removal_filter",
+                {"depth": {"noise_removal_filter": "false"}},
+            ),
+            ("depth.post_filter", {"depth": {"post_filter": "true"}}),
+            (
+                "depth.edge_vertical_direction",
+                {"depth": {"edge_vertical_direction": "false"}},
+            ),
+            (
+                "ir.enabled",
+                {"ir": {"data_flow": {"enabled": "false"}}},
+            ),
+            (
+                "ir.auto_exposure",
+                {"ir": {"control": {"auto_exposure": "true"}}},
+            ),
+            ("laser.enabled", {"laser": {"enabled": "false"}}),
+            ("laser.ldp_enabled", {"laser": {"ldp_enabled": "true"}}),
+        ]
+
+        for field, data in invalid_cases:
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field.replace(".", r"\.")
+            ):
+                OrbbecConfig.from_dict(data)
+
+    def test_rejects_unreasonably_large_resource_parameters(self) -> None:
+        invalid_cases = [
+            ("color.width", {"color": {"data_flow": {"width": 1_000_000}}}),
+            ("depth.fps", {"depth": {"fps": 1_000_000}}),
+            (
+                "ir.width",
+                {"ir": {"data_flow": {"width": 8192, "height": 8192}}},
+            ),
+            ("connect_delay_ms", {"connect_delay_ms": 10**9}),
+            ("init_timeout_sec", {"init_timeout_sec": 10**9}),
+        ]
+
+        for field, data in invalid_cases:
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field.replace(".", r"\.")
+            ):
+                OrbbecConfig.from_dict(data)
+
+
+class FrameExtractionTests(unittest.TestCase):
+    @staticmethod
+    def _backend() -> backend_orbbec.OrbbecBackend:
+        backend = backend_orbbec.OrbbecBackend.__new__(backend_orbbec.OrbbecBackend)
+        backend._config = OrbbecConfig()
+        return backend
+
+    @staticmethod
+    def _video_frame(fmt: object, data: np.ndarray, *, width: int, height: int) -> mock.Mock:
+        frame = mock.Mock()
+        frame.get_width.return_value = width
+        frame.get_height.return_value = height
+        frame.get_format.return_value = fmt
+        frame.get_data.return_value = data
+        frame.as_video_frame.return_value = frame
+        return frame
+
+    def test_color_raw_formats_reject_short_and_long_buffers(self) -> None:
+        backend = self._backend()
+        width, height = 4, 2
+        cases = [
+            (backend_orbbec.ob.OBFormat.RGB, width * height * 3),
+            (backend_orbbec.ob.OBFormat.BGR, width * height * 3),
+            (backend_orbbec.ob.OBFormat.YUYV, width * height * 2),
+        ]
+
+        for fmt, expected_bytes in cases:
+            for actual_bytes in (expected_bytes - 1, expected_bytes + 1):
+                with self.subTest(fmt=fmt, actual_bytes=actual_bytes):
+                    frameset = mock.Mock()
+                    frameset.get_color_frame.return_value = self._video_frame(
+                        fmt,
+                        np.zeros(actual_bytes, dtype=np.uint8),
+                        width=width,
+                        height=height,
+                    )
+                    with mock.patch.object(backend_orbbec.logger, "warning") as warning:
+                        self.assertEqual(backend._extract_color(frameset), (None, None))
+                    warning.assert_called()
+
+    def test_ir_raw_formats_reject_short_and_long_buffers(self) -> None:
+        backend = self._backend()
+        width, height = 3, 2
+        cases = [
+            (backend_orbbec.ob.OBFormat.Y8, width * height),
+            (backend_orbbec.ob.OBFormat.Y16, width * height * 2),
+        ]
+
+        for fmt, expected_bytes in cases:
+            for actual_bytes in (expected_bytes - 1, expected_bytes + 1):
+                with self.subTest(fmt=fmt, actual_bytes=actual_bytes):
+                    frameset = mock.Mock()
+                    frameset.get_ir_frame.return_value = self._video_frame(
+                        fmt,
+                        np.zeros(actual_bytes, dtype=np.uint8),
+                        width=width,
+                        height=height,
+                    )
+                    with mock.patch.object(backend_orbbec.logger, "warning") as warning:
+                        self.assertIsNone(backend._extract_ir(frameset))
+                    warning.assert_called()
 
 
 class BackendLifecycleTests(unittest.TestCase):
@@ -375,6 +507,8 @@ class ExampleDataflowTests(unittest.TestCase):
         self.assertIn("--group build", build_script)
         self.assertIn("--no-default-groups", build_script)
         self.assertNotIn("uv pip install", build_script)
+        self.assertIn("pip-licenses", build_script)
+        self.assertIn("THIRD_PARTY_LICENSES.txt", build_script)
 
         legacy_rules = PACKAGE_ROOT / "scripts" / "udev" / "99-obsensor-libusb.rules"
         canonical_rules = (
@@ -392,12 +526,17 @@ class ExampleDataflowTests(unittest.TestCase):
         self.assertIn('TAG+="uaccess"', rules)
 
         setup = (PACKAGE_ROOT / "scripts" / "setup.sh").read_text()
-        self.assertRegex(setup, r"apt-get install.*\n.*if !|if ! DEBIAN_FRONTEND")
+        self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", setup)
+        self.assertNotIn("apt-get", setup)
+        self.assertIn("EXPECTED_RULES_SHA256", setup)
+        self.assertIn("sha256sum", setup)
+        self.assertIn("RUN|PROGRAM|IMPORT", setup)
         self.assertIn("exit 1", setup)
 
         spec = (PACKAGE_ROOT / "scripts" / "orbbec_camera.spec").read_text()
         self.assertIn("99-obsensor-libusb.rules", spec)
         self.assertIn("forge_devices_orbbec_camera/resources", spec)
+        self.assertIn("THIRD_PARTY_LICENSES.txt", spec)
         entry = (PACKAGE_ROOT / "scripts" / "pyinstaller_entry.py").read_text()
         self.assertIn("multiprocessing.freeze_support()", entry)
         project = (PACKAGE_ROOT / "pyproject.toml").read_text()

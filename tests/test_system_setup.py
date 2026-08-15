@@ -56,7 +56,11 @@ def test_inspect_matches_bundled_rule_and_discovers_accessible_orbbec_node(
 ) -> None:
     rule = system_setup._bundled_rule().read_bytes()
     installed_rule = tmp_path / "rule"
-    installed_rule.write_bytes(rule)
+    installed_rule.write_bytes(
+        b"\n".join(
+            line for line in rule.splitlines() if not line.lstrip().startswith(b"#")
+        )
+    )
     sys_root = tmp_path / "sys"
     device = sys_root / "1-2"
     device.mkdir(parents=True)

@@ -1,3 +1,5 @@
+# Derived from the OrbbecSDK_v2 udev rules, licensed under Apache-2.0.
+# Modified by X-ERA: use root:video 0660 permissions and add uaccess tags.
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="2bc5", ATTRS{idProduct}=="0501", MODE:="0660",  OWNER:="root", GROUP:="video", SYMLINK+="Bootloader_Device", TAG+="uaccess"
 
 # UVC Modules

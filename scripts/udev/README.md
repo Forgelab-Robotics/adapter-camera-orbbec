@@ -6,9 +6,9 @@
 `uaccess`，不再使用厂商规则中的全局可写 `0666`。
 
 root-owned 可信路径中的 frozen 二进制可运行 `orbbec-camera init-device` 检查并初始化；
-源码部署使用
-`sudo bash scripts/install_permissions.sh`。[`setup.sh`](../setup.sh) 会从此兼容路径读取并
-安装到 `/etc/udev/rules.d/`，根据 `SUDO_USER` 配置 `video` 组，并在有 `apt-get` 时安装
-`libusb-1.0-0`；开发头文件 `libusb-1.0-0-dev` 需自行安装。
+源码部署使用 `sudo bash scripts/install_permissions.sh`。[`setup.sh`](../setup.sh) 直接读取包内
+权威规则并安装到 `/etc/udev/rules.d/`，同时根据 `SUDO_USER` 配置 `video` 组。脚本不会调用
+系统包管理器；管理员必须事先安装 `libusb-1.0-0`，开发头文件
+`libusb-1.0-0-dev` 也需按需自行安装。
 
 升级 SDK 大版本时可同步新增设备 ID，但必须保留上述最小权限设置。

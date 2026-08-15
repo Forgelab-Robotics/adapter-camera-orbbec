@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install libusb runtime
+        run: sudo apt-get update && sudo apt-get install --yes libusb-1.0-0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+          enable-cache: true
+
+      - name: Verify lock file
+        run: uv lock --check
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python ${{ matrix.python }}
+
+      - name: Run tests
+        run: uv run --frozen pytest tests -q
+
+      - name: Build source and wheel packages
+        run: uv build
+
+  binary:
+    name: PyInstaller binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install runtime tools
+        run: sudo apt-get update && sudo apt-get install --yes binutils file libusb-1.0-0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+          enable-cache: true
+
+      - name: Build single-file executable
+        run: bash scripts/build_pyinstaller.sh
+
+      - name: Smoke-test executable
+        run: |
+          dist/orbbec_camera --version
+          dist/orbbec_camera licenses > license-output.txt
+          grep -q 'dora-rs 0.4.1 license notice' license-output.txt
+          grep -q 'pyorbbecsdk2' license-output.txt
+          file dist/orbbec_camera
+          ldd dist/orbbec_camera
+
+      - name: Reject private build markers
+        run: |
+          if strings dist/orbbec_camera | grep -E '/home/|file:///|git\+ssh://'; then
+            exit 1
+          fi
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+          enable-cache: true
+
+      - name: Export locked runtime dependencies
+        run: uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt --output-file requirements-audit.txt
+
+      - name: Audit dependencies
+        run: uvx pip-audit --requirement requirements-audit.txt

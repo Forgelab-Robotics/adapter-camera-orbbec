@@ -36,6 +36,65 @@ if TYPE_CHECKING:
 _MAX_CONSECUTIVE_WAIT_ERRORS = 3
 
 
+def _reshape_raw_frame(
+    data: object,
+    *,
+    dtype: np.dtype,
+    shape: tuple[int, ...],
+    stream: str,
+    format_name: str,
+) -> np.ndarray | None:
+    """Validate a raw SDK buffer before interpreting its pixels."""
+    if any(dimension <= 0 for dimension in shape):
+        logger.warning(
+            "[orbbec_camera] %s %s 帧尺寸非法: %s",
+            stream,
+            format_name,
+            shape,
+        )
+        return None
+
+    expected_elements = 1
+    for dimension in shape:
+        expected_elements *= dimension
+    target_dtype = np.dtype(dtype)
+    expected_bytes = expected_elements * target_dtype.itemsize
+
+    try:
+        buffer = np.asanyarray(data)
+        actual_bytes = buffer.nbytes
+        if actual_bytes != expected_bytes:
+            logger.warning(
+                "[orbbec_camera] %s %s 帧缓冲区长度异常: 期望 %s bytes "
+                "(%s elements)，实际 %s bytes",
+                stream,
+                format_name,
+                expected_bytes,
+                expected_elements,
+                actual_bytes,
+            )
+            return None
+        raw = np.frombuffer(buffer, dtype=target_dtype)
+        if raw.size != expected_elements:
+            logger.warning(
+                "[orbbec_camera] %s %s 帧元素数异常: 期望 %s，实际 %s",
+                stream,
+                format_name,
+                expected_elements,
+                raw.size,
+            )
+            return None
+        return raw.reshape(shape)
+    except (BufferError, TypeError, ValueError) as e:
+        logger.warning(
+            "[orbbec_camera] %s %s 帧缓冲区解析失败: %s",
+            stream,
+            format_name,
+            e,
+        )
+        return None
+
+
 _COLOR_FORMAT_MAP = {
     "rgb8": ob.OBFormat.RGB,
     "jpeg": ob.OBFormat.MJPG,
@@ -773,14 +832,42 @@ class OrbbecBackend:
                 arr = cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
             return np.ascontiguousarray(arr), None
         if fmt == ob.OBFormat.RGB:
-            return np.ascontiguousarray(np.resize(data, (h, w, 3))), None
+            rgb = _reshape_raw_frame(
+                data,
+                dtype=np.uint8,
+                shape=(h, w, 3),
+                stream="Color",
+                format_name="RGB",
+            )
+            return (None, None) if rgb is None else (np.ascontiguousarray(rgb), None)
         if fmt == ob.OBFormat.BGR:
-            bgr = np.resize(data, (h, w, 3))
+            bgr = _reshape_raw_frame(
+                data,
+                dtype=np.uint8,
+                shape=(h, w, 3),
+                stream="Color",
+                format_name="BGR",
+            )
+            if bgr is None:
+                return None, None
             return np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), None
         if fmt == ob.OBFormat.YUYV:
-            yuyv = np.resize(data, (h, w, 2))
-            bgr = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
-            return np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), None
+            yuyv = _reshape_raw_frame(
+                data,
+                dtype=np.uint8,
+                shape=(h, w, 2),
+                stream="Color",
+                format_name="YUYV",
+            )
+            if yuyv is None:
+                return None, None
+            try:
+                bgr = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
+                return np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), None
+            except cv2.error as e:
+                logger.warning("[orbbec_camera] Color YUYV 帧转换失败: %s", e)
+                return None, None
+        logger.warning("[orbbec_camera] 不支持的 Color 帧格式: %s", fmt)
         return None, None
 
     def _extract_depth(self, frameset: ob.FrameSet) -> np.ndarray | None:
@@ -840,16 +927,36 @@ class OrbbecBackend:
         data = np.asanyarray(frame.get_data())
         ir_fmt = frame.get_format()
 
-        try:
-            if ir_fmt == ob.OBFormat.Y8:
-                return np.ascontiguousarray(np.resize(data, (h, w)))
-            if ir_fmt == ob.OBFormat.MJPG:
+        if ir_fmt == ob.OBFormat.Y8:
+            arr = _reshape_raw_frame(
+                data,
+                dtype=np.uint8,
+                shape=(h, w),
+                stream="IR",
+                format_name="Y8",
+            )
+            return None if arr is None else np.ascontiguousarray(arr)
+        if ir_fmt == ob.OBFormat.MJPG:
+            try:
                 gray = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
-                return None if gray is None else np.ascontiguousarray(gray)
-            arr = np.frombuffer(data, dtype=np.uint16)
-            return np.ascontiguousarray(np.resize(arr, (h, w)))
-        except (ValueError, cv2.error):
-            return None
+            except cv2.error as e:
+                logger.warning("[orbbec_camera] IR MJPG 帧解码失败: %s", e)
+                return None
+            if gray is None:
+                logger.warning("[orbbec_camera] IR MJPG 帧解码失败")
+                return None
+            return np.ascontiguousarray(gray)
+        if ir_fmt == ob.OBFormat.Y16:
+            arr = _reshape_raw_frame(
+                data,
+                dtype=np.uint16,
+                shape=(h, w),
+                stream="IR",
+                format_name="Y16",
+            )
+            return None if arr is None else np.ascontiguousarray(arr)
+        logger.warning("[orbbec_camera] 不支持的 IR 帧格式: %s", ir_fmt)
+        return None
 
     @staticmethod
     def _is_disconnect_error(e: Exception) -> bool:

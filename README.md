@@ -9,14 +9,14 @@ src layout：`src/forge_devices_orbbec_camera`。
 - Color：`forge_msgs.Image(rgb8)` 或 `CompressedImage(jpeg)`
 - Depth：`forge_msgs.Image(32FC1)`，float32，单位米，零值表示无效深度
 - IR：`forge_msgs.Image(mono8)`（兼容后端返回 uint16 时为 `16UC1`）
-- 已验证硬件基线、风险和尚未完成项见 [hardware_baseline.md](hardware_baseline.md)
+
 
 ## 安装与环境检查
 
 ```bash
 uv sync
 uv run python scripts/check_environment.py
-sudo bash scripts/install_permissions.sh  # 仅首次源码部署需要
+sudo bash scripts/install_permissions.sh  # 仅限管理员审阅脚本与规则后的源码部署
 ```
 
 普通 Dora 节点和 `snapshot` 启动时会检查 `libusb`、内嵌 udev 规则版本、`video`
@@ -38,10 +38,11 @@ privileged helper 只原子安装固定内嵌规则、将 `PKEXEC_UID` 对应的
 组并 reload udev；不会调用包管理器，也不会删除检测到的其他 Orbbec udev 规则。完成后
 需重新插拔设备，并注销后重新登录以刷新用户组。
 
-`sudo bash scripts/install_permissions.sh` 是源码部署的显式管理员入口，会安装
-Debian/Ubuntu 的 `libusb-1.0-0`、同一份规则，并根据 `SUDO_USER` 将实际调用用户加入
-`video` 组。其他发行版需自行安装等价 libusb 运行时；源码构建 SDK 时才需要
-`libusb-1.0-0-dev`。
+`sudo bash scripts/install_permissions.sh` 是源码部署的显式管理员入口。运行前必须审阅
+脚本和固定 udev 规则，且不得为用户可写路径配置免密 sudo。该入口固定系统命令搜索路径、
+校验规则 SHA-256、拒绝可执行 udev 指令并安装同一份规则，然后根据 `SUDO_USER` 将实际
+调用用户加入 `video` 组；它不会调用包管理器，系统必须事先安装 libusb 运行时。
+源码构建 SDK 时才需要 `libusb-1.0-0-dev`。
 
 官方工具验证应先使用 Orbbec Viewer 或 SDK 官方示例确认设备、固件、流 profile
 和深度工作模式，再运行本项目。
@@ -85,8 +86,7 @@ UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视�
 - `output_color`、`output_depth`、`output_ir`：稳定的 Dora topic
 
 当前不支持运行时配置更新。流 profile、设备、对齐和绝大多数控制参数需修改 YAML
-后重启节点。参数验证范围与实机清单见
-[parameter_validation.md](parameter_validation.md)。
+后重启节点。
 
 ## 输出语义
 
@@ -111,12 +111,12 @@ SDK 提供的 Depth 原始像素会结合 `get_depth_scale()` 归一为毫米，
 bash scripts/build_pyinstaller.sh
 ```
 
-产物为 `dist/orbbec_camera`。spec 会从已安装的 wheel 收集
+产物为 `dist/orbbec_camera`。公开归档只包含该二进制；项目及第三方许可证已嵌入，
+可通过 `orbbec_camera licenses` 查看。spec 会从已安装的 wheel 收集
 `libOrbbecSDK.so*`、Python 扩展、`extensions/` 和固定 udev 规则，运行时 hook 设置
 bundle 内动态库搜索路径。安装到上述可信系统路径后可执行 `init-device`；构建目录中的
 用户自有产物会拒绝自动提权，这是预期安全行为。构建脚本
-使用 `uv.lock`、`[tool.uv.sources]` 和隔离的 `.venv_build`
-同步依赖；锁文件过期会直接失败。构建机和目标机必须使用兼容架构与 libc。
+使用 `uv.lock`、公开 PyPI 依赖和隔离的 `.venv_build` 同步依赖；锁文件过期会直接失败。构建机和目标机必须使用兼容架构与 libc。
 
 ## 常见问题
 
@@ -129,4 +129,14 @@ bundle 内动态库搜索路径。安装到上述可信系统路径后可执行 
 - profile 不支持：用官方 Viewer 确认当前型号/固件提供的分辨率、帧率和格式。
 - 深度全零：检查工作模式、曝光、有效范围和 `depth_unit`，并用已知距离实测。
 
-不要把个人绝对路径、设备录包、私有 SDK 或密钥写入配置和示例。
+## 数据与隐私
+
+本项目默认不提供遥测，也不会自行上传相机数据。Color、Depth 和 IR 帧会发送到当前
+Dora dataflow 配置的接收方；部署者需要自行确认 Dora/Zenoh 的网络边界和访问控制。
+`snapshot` 会将图像写入调用者指定的位置，设备枚举和日志可能包含设备序列号、固件和
+USB 信息。
+
+相机图像、红外图、深度图和设备序列号都应按敏感数据处理。采集包含人员、屏幕、文档
+或私人场所的数据前，应获得适用的授权并制定保留、访问和删除策略。
+
+不要把个人绝对路径、设备录包、真实场景图像、私有 SDK、设备序列号或密钥提交到仓库。
