@@ -6,6 +6,10 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+### Removed
+
+- Removed the optional security-policy and code-of-conduct files to align the public documentation set across adapters.
+
 ## 1.0.1 - 2026-08-15
 
 ### Added
