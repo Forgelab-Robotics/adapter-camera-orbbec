@@ -6,6 +6,8 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+## 1.1.0 - 2026-08-24
+
 ### Added
 
 - Added optional Forge PointCloud v1 Dora output with organized XYZ/XYZRGB semantics, optical-frame and invalid-point rules, reference configuration, hardware-validation guidance, and `PointCloudView` example routing.
