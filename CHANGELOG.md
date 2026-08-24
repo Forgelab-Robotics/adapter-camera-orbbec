@@ -6,6 +6,15 @@ The project follows Semantic Versioning. Dates use the `YYYY-MM-DD` format.
 
 ## Unreleased
 
+### Added
+
+- Added optional Forge PointCloud v1 Dora output with organized XYZ/XYZRGB semantics, optical-frame and invalid-point rules, reference configuration, hardware-validation guidance, and `PointCloudView` example routing.
+
+### Changed
+
+- Updated to `forge-msgs==1.1.0`; point-cloud processing uses the published Depth frame, detaches SDK buffers into immutable columns, and fails open so Color/Depth/IR continue when the optional derived output is unavailable.
+- Documented the unavoidable multiprocessing serialization copy in `capture_process: isolated`; NumPy-to-Arrow uses `copy="never"` only after the frame reaches the parent process.
+
 ### Removed
 
 - Removed the optional security-policy and code-of-conduct files to align the public documentation set across adapters.

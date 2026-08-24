@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import multiprocessing as mp
+import pickle
 import queue
 from unittest import mock
 
@@ -7,13 +9,67 @@ import numpy as np
 import pytest
 
 from forge_devices_orbbec_camera import backend
-from forge_devices_orbbec_camera.backend import OrbbeFrame
+from forge_devices_orbbec_camera.backend import OrbbeFrame, OrbbecPointCloud
 from forge_devices_orbbec_camera.config import OrbbecConfig
 from forge_devices_orbbec_camera.isolated_backend import (
     IsolatedOrbbecBackend,
     _capture_worker,
     _put_latest,
 )
+
+
+def _readonly_array(values: object, dtype: np.dtype) -> np.ndarray:
+    array = np.array(values, dtype=dtype, order="C", copy=True)
+    array.setflags(write=False)
+    return array
+
+
+def _point_cloud_frame() -> OrbbeFrame:
+    cloud = OrbbecPointCloud(
+        width=2,
+        height=2,
+        is_dense=True,
+        x=_readonly_array([[1.0, 2.0], [3.0, 4.0]], np.dtype(np.float32)),
+        y=_readonly_array([[5.0, 6.0], [7.0, 8.0]], np.dtype(np.float32)),
+        z=_readonly_array([[9.0, 10.0], [11.0, 12.0]], np.dtype(np.float32)),
+        rgb=(
+            _readonly_array([[10, 20], [30, 40]], np.dtype(np.uint8)),
+            _readonly_array([[50, 60], [70, 80]], np.dtype(np.uint8)),
+            _readonly_array([[90, 100], [110, 120]], np.dtype(np.uint8)),
+        ),
+    )
+    return OrbbeFrame(
+        color=None,
+        depth=np.ones((2, 2), dtype=np.float32),
+        ir=None,
+        timestamp_ms=123,
+        point_cloud=cloud,
+    )
+
+
+def _put_point_cloud_packet(frame_queue: object) -> None:
+    frame_queue.put((7, _point_cloud_frame()))  # type: ignore[attr-defined]
+
+
+def _point_cloud_proxy() -> IsolatedOrbbecBackend:
+    isolated = IsolatedOrbbecBackend.__new__(IsolatedOrbbecBackend)
+    isolated._latest_frame = None
+    isolated._latest_seq = -1
+    return isolated
+
+
+def _assert_frozen_point_cloud(frame: OrbbeFrame) -> None:
+    cloud = frame.point_cloud
+    assert cloud is not None
+    assert cloud.rgb is not None
+    for array in (cloud.x, cloud.y, cloud.z):
+        assert array.dtype == np.dtype(np.float32)
+        assert array.flags.c_contiguous
+        assert not array.flags.writeable
+    for channel in cloud.rgb:
+        assert channel.dtype == np.dtype(np.uint8)
+        assert channel.flags.c_contiguous
+        assert not channel.flags.writeable
 
 
 def test_capture_process_config_validation() -> None:
@@ -131,6 +187,55 @@ def test_wait_new_frame_returns_newest_sequence() -> None:
 
     assert seq == 5
     assert frame is newest
+
+
+def test_pickled_point_cloud_is_refrozen_when_parent_accepts_packet() -> None:
+    packet = pickle.loads(pickle.dumps((7, _point_cloud_frame())))
+    received_cloud = packet[1].point_cloud
+    assert received_cloud is not None
+    assert received_cloud.x.flags.writeable
+    assert received_cloud.rgb is not None
+    assert all(channel.flags.writeable for channel in received_cloud.rgb)
+    isolated = _point_cloud_proxy()
+
+    isolated._accept_packet(packet)
+
+    assert isolated._latest_seq == 7
+    assert isolated._latest_frame is packet[1]
+    _assert_frozen_point_cloud(isolated._latest_frame)
+
+
+def test_spawn_queue_point_cloud_is_refrozen_in_parent() -> None:
+    context = mp.get_context("spawn")
+    frame_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_put_point_cloud_packet,
+        args=(frame_queue,),
+    )
+    started = False
+    try:
+        process.start()
+        started = True
+        packet = frame_queue.get(timeout=15.0)
+        process.join(timeout=15.0)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+        received_cloud = packet[1].point_cloud
+        assert received_cloud is not None
+        assert received_cloud.x.flags.writeable
+
+        isolated = _point_cloud_proxy()
+        isolated._accept_packet(packet)
+
+        assert isolated._latest_seq == 7
+        assert isolated._latest_frame is packet[1]
+        _assert_frozen_point_cloud(isolated._latest_frame)
+    finally:
+        if started and process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+        frame_queue.close()
+        frame_queue.join_thread()
 
 
 def test_wait_new_frame_surfaces_worker_error() -> None:

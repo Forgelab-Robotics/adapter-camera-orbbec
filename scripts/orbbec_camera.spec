@@ -103,6 +103,7 @@ a = Analysis(
         "forge_msgs",
         "forge_msgs.arrow",
         "forge_msgs.image",
+        "forge_msgs.point_cloud",
         "forge_common",
         "dora",
     ],

@@ -19,6 +19,19 @@ if TYPE_CHECKING:
     from .config import OrbbecConfig
 
 
+@dataclass(frozen=True)
+class OrbbecPointCloud:
+    """SDK-independent immutable columns for an organized point cloud."""
+
+    width: int
+    height: int
+    is_dense: bool
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    rgb: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+
 @dataclass
 class OrbbeFrame:
     """一次采集周期的三路帧数据。
@@ -31,6 +44,7 @@ class OrbbeFrame:
     - timestamp_ms: 帧时间戳（毫秒），来自 SDK，用于调试和日志。
     - color_jpeg: 设备 MJPG 透传字节；与 color 互斥优先用于 jpeg 输出。
     - capture_timestamp_ns: 后端取得该 FrameSet 时的 Unix epoch 纳秒时间；None 表示不可用。
+    - point_cloud: 可选 organized XYZ / XYZRGB 点云；不含任何 SDK 对象。
     """
 
     color: np.ndarray | None
@@ -39,6 +53,7 @@ class OrbbeFrame:
     timestamp_ms: int = 0
     color_jpeg: bytes | None = None
     capture_timestamp_ns: int | None = None
+    point_cloud: OrbbecPointCloud | None = None
 
     @property
     def color_shape(self) -> tuple[int, int] | None:

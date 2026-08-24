@@ -8,6 +8,7 @@ src layout：`src/forge_devices_orbbec_camera`。
 - Linux + USB；运行时需要 libusb 和 Orbbec udev 规则
 - Color：`forge_msgs.Image(rgb8)` 或 `CompressedImage(jpeg)`
 - Depth：`forge_msgs.Image(32FC1)`，float32，单位米，零值表示无效深度
+- PointCloud：可选 Forge `PointCloud` v1 organized XYZ/XYZRGB 输出，默认关闭
 - IR：`forge_msgs.Image(mono8)`（兼容后端返回 uint16 时为 `16UC1`）
 
 
@@ -68,8 +69,9 @@ uv run orbbec-camera --config config/sensor.example.yaml
 
 Python 独立示例见 `examples/python_list_devices` 和
 `examples/python_capture_sample`。Dora 的可消费链路见
-`examples/dora_sensor_stream`，其中 sink 会实际解码消息并打印计数、尺寸、编码和
-UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视化联调。
+`examples/dora_sensor_stream`，其中 sink 会用 `PointCloudView` 解码点云、用
+`Image`/`CompressedImage` 解码图像，并打印流信息和 UTC 接收时间。旧的
+`examples/orbbec_camera_viewer` 仍保留用于图像可视化联调。
 
 ## 配置
 
@@ -83,7 +85,8 @@ UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视�
 - `prewarm_frames`、`connect_delay_ms`、`init_timeout_sec`：启动行为
 - `capture_process`：`isolated` 将 pyorbbecsdk 放入独立子进程，避免与
   Dora/Zenoh 共享文件描述符；Dora 节点推荐使用。`direct` 仅用于独立工具调试
-- `output_color`、`output_depth`、`output_ir`：稳定的 Dora topic
+- `point_cloud`：Forge PointCloud v1 开关、RGB 着色和可选 `frame_id`
+- `output_color`、`output_depth`、`output_ir`、`output_point_cloud`：稳定的 Dora topic
 
 当前不支持运行时配置更新。流 profile、设备、对齐和绝大多数控制参数需修改 YAML
 后重启节点。
@@ -95,12 +98,34 @@ UTC 接收时间。旧的 `examples/orbbec_camera_viewer` 仍保留用于可视�
 | `image/color` | `Image` 或 `CompressedImage` | `rgb8` 或 JPEG |
 | `image/depth` | `Image` | `32FC1`，米 |
 | `image/ir` | `Image` | `mono8`，兼容 `16UC1` |
+| `point_cloud` | Forge `PointCloud` v1 | organized float32 XYZ（米）及可选 uint8 RGB |
 
-Dora 图像输出会尽力附加用户 metadata `capture_timestamp_ns`：它是采集后端取得
-该 FrameSet 时记录的 Unix epoch 纳秒时间，用于关联同一次采集的 Color / Depth /
-IR。该字段是可选的最佳估计，不替代 Dora 管理的消息时间戳；缓存、编码和发送过程
-不会重新生成它。后端日志中的 `timestamp_ms` 是 SDK 帧时间戳，仅用于诊断。
-`align_mode=sw/hw` 时 Depth 会投影到 Color 坐标系；`disable` 时各流保持原始坐标系。
+点云输出默认关闭；默认 topic 和配置契约如下：
+
+```yaml
+output_point_cloud: point_cloud
+point_cloud:
+  enabled: false
+  colorize: true
+  frame_id: null
+```
+
+启用 `point_cloud.enabled` 必须同时启用 Depth。`align_mode=disable` 配合
+`colorize:false` 输出 XYZ-only，坐标位于 Depth optical frame；`colorize:true` 还必须
+启用 Color，并要求 `align_mode=sw` 或 `hw` D2C，XYZ 坐标位于 Color optical frame。
+彩色点云建议同时设置 `frame_sync:true`；否则空间对齐仍有效，但动态场景中的 Color/Depth
+时间对应仅为 best-effort。点云是 organized 网格，XYZ 数组均为 float32 米制坐标；无效槽位的 X、Y、Z 全部为
+NaN。着色时 R/G/B 数组为 uint8，无效点为黑色；不着色时 RGB 数组为空。
+
+消费端可使用 `PointCloudView.from_arrow(event["value"])`。`capture_process=isolated`
+会通过 multiprocessing IPC/pickle 将帧从采集子进程拷贝到父进程；即使消费端本地
+NumPy/PyArrow 视图可保持低拷贝，也不表示 Dora 链路端到端 zero-copy。
+
+Dora 图像与点云输出会尽力附加用户 metadata `capture_timestamp_ns`：它是采集后端取得
+该 FrameSet 时记录的 Unix epoch 纳秒时间，用于关联同一次采集的 Color / Depth / IR /
+PointCloud。该字段是可选的最佳估计，不替代 Dora 管理的消息时间戳；缓存、编码和发送
+过程不会重新生成它。`point_cloud.frame_id` 非 `null` 时，点云还会附加可选用户
+metadata `frame_id`。后端日志中的 `timestamp_ms` 是 SDK 帧时间戳，仅用于诊断。
 
 SDK 提供的 Depth 原始像素会结合 `get_depth_scale()` 归一为毫米，公共消息层再除以
 1000 转为米。快照 PNG 仍保存 uint16 毫米值，不能与 Dora `32FC1` 直接混用。
@@ -131,8 +156,8 @@ bundle 内动态库搜索路径。安装到上述可信系统路径后可执行 
 
 ## 数据与隐私
 
-本项目默认不提供遥测，也不会自行上传相机数据。Color、Depth 和 IR 帧会发送到当前
-Dora dataflow 配置的接收方；部署者需要自行确认 Dora/Zenoh 的网络边界和访问控制。
+本项目默认不提供遥测，也不会自行上传相机数据。Color、Depth、IR 和点云帧会发送到
+当前 Dora dataflow 配置的接收方；部署者需要自行确认 Dora/Zenoh 的网络边界和访问控制。
 `snapshot` 会将图像写入调用者指定的位置，设备枚举和日志可能包含设备序列号、固件和
 USB 信息。
 

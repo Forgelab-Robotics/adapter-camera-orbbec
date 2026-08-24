@@ -5,6 +5,7 @@
   - image/color  Color 帧（Image rgb8 或 CompressedImage jpeg）
   - image/depth  Depth 帧（Image 32FC1，单位 m）
   - image/ir     IR 帧（Image mono8 或 16UC1）
+  - point_cloud  可选 organized PointCloud（XYZ 或 XYZRGB，单位 m）
 
 CLI 子命令（不启动 dora）：
   init-device    检查并初始化 udev 规则和 video 用户组，必要时请求 PolicyKit 权限
@@ -33,7 +34,7 @@ _configure_runtime_env()
 
 import pyarrow as pa
 from forge_common import get_logger
-from forge_msgs import CompressedImage, Image
+from forge_msgs import CompressedImage, Image, PointCloudBatch
 
 from . import __version__
 from .backend import CaptureBackend, OrbbeFrame, create_backend
@@ -53,7 +54,7 @@ class _HelpFormatter(
 
 
 _ROOT_DESCRIPTION = """\
-Orbbec Gemini 2 深度相机 dora 节点：在 tick 驱动下输出 Color / Depth / IR（forge_msgs.Image / CompressedImage）。
+Orbbec Gemini 2 深度相机 dora 节点：在 tick 驱动下输出 Color / Depth / IR，并可选输出 Forge PointCloud v1（默认关闭，XYZ 单位米）。
 
 【节点模式】不提供子命令时启动 dora，需配置文件。
 【设备初始化】init-device 检查环境；可信路径中的 frozen 二进制可请求固定系统配置。
@@ -244,6 +245,7 @@ class EncodedOutputs:
     color: pa.RecordBatch | None
     depth: pa.RecordBatch | None
     ir: pa.RecordBatch | None
+    point_cloud: pa.RecordBatch | None
 
 
 def _frame_to_color_image(frame: OrbbeFrame, config: OrbbecConfig) -> Image | CompressedImage | None:
@@ -268,6 +270,23 @@ def _frame_to_depth_image(frame: OrbbeFrame) -> Image | None:
     return Image.from_numpy(frame.depth, encoding="32FC1")
 
 
+def _frame_to_point_cloud(frame: OrbbeFrame) -> PointCloudBatch | None:
+    """Build the canonical PointCloud v1 Arrow owner without another copy."""
+    cloud = frame.point_cloud
+    if cloud is None:
+        return None
+    return PointCloudBatch.from_numpy(
+        x=cloud.x,
+        y=cloud.y,
+        z=cloud.z,
+        rgb=cloud.rgb,
+        width=cloud.width,
+        height=cloud.height,
+        is_dense=cloud.is_dense,
+        copy="never",
+    )
+
+
 def _frame_to_ir_image(frame: OrbbeFrame) -> Image | None:
     """将 OrbbeFrame.ir 转为 forge_msgs.Image。
 
@@ -284,6 +303,17 @@ def _encode_frame(frame: OrbbeFrame, config: OrbbecConfig, seq: int) -> EncodedO
     color_img = _frame_to_color_image(frame, config)
     depth_img = _frame_to_depth_image(frame) if config.depth.enabled else None
     ir_img = _frame_to_ir_image(frame) if config.ir.enabled else None
+    point_cloud_payload: pa.RecordBatch | None = None
+    if config.point_cloud.enabled:
+        try:
+            point_cloud = _frame_to_point_cloud(frame)
+            if point_cloud is not None:
+                point_cloud_payload = point_cloud.to_arrow()
+        except Exception as e:
+            logger.warning(
+                "[orbbec_camera] 点云消息构建失败，继续输出图像: %s",
+                e,
+            )
     return EncodedOutputs(
         seq=seq,
         timestamp_ms=frame.timestamp_ms,
@@ -291,14 +321,22 @@ def _encode_frame(frame: OrbbeFrame, config: OrbbecConfig, seq: int) -> EncodedO
         color=None if color_img is None else color_img.to_arrow(),
         depth=None if depth_img is None else depth_img.to_arrow(),
         ir=None if ir_img is None else ir_img.to_arrow(),
+        point_cloud=point_cloud_payload,
     )
 
 
-def _capture_metadata(capture_timestamp_ns: int | None) -> dict[str, int]:
+def _capture_metadata(
+    capture_timestamp_ns: int | None,
+    *,
+    frame_id: str | None = None,
+) -> dict[str, int | str]:
     """Build optional user metadata without touching Dora-managed metadata."""
-    if capture_timestamp_ns is None:
-        return {}
-    return {"capture_timestamp_ns": capture_timestamp_ns}
+    metadata: dict[str, int | str] = {}
+    if capture_timestamp_ns is not None:
+        metadata["capture_timestamp_ns"] = capture_timestamp_ns
+    if frame_id is not None:
+        metadata["frame_id"] = frame_id
+    return metadata
 
 
 def _send_output(
@@ -306,12 +344,35 @@ def _send_output(
     output_id: str,
     payload: pa.RecordBatch,
     capture_timestamp_ns: int | None,
+    *,
+    frame_id: str | None = None,
 ) -> None:
     node.send_output(  # type: ignore[attr-defined]
         output_id,
         payload,
-        metadata=_capture_metadata(capture_timestamp_ns),
+        metadata=_capture_metadata(capture_timestamp_ns, frame_id=frame_id),
     )
+
+
+def _send_point_cloud_output(
+    node: object,
+    payload: pa.RecordBatch,
+    config: OrbbecConfig,
+    capture_timestamp_ns: int | None,
+) -> bool:
+    """Send the optional derived output without disrupting image streams."""
+    try:
+        _send_output(
+            node,
+            config.output_point_cloud,
+            payload,
+            capture_timestamp_ns,
+            frame_id=config.point_cloud.frame_id,
+        )
+    except Exception as e:
+        logger.warning("[orbbec_camera] 点云发送失败，继续输出图像: %s", e)
+        return False
+    return True
 
 
 def run_node(config: OrbbecConfig) -> int:
@@ -361,10 +422,12 @@ def run_node(config: OrbbecConfig) -> int:
     encode_thread.start()
 
     logger.info(
-        "[orbbec_camera] 节点启动，输出: color=%s depth=%s ir=%s",
+        "[orbbec_camera] 节点启动，输出: color=%s depth=%s ir=%s point_cloud=%s (%s)",
         config.output_color,
         config.output_depth,
         config.output_ir,
+        config.output_point_cloud,
+        "enabled" if config.point_cloud.enabled else "disabled",
     )
 
     try:
@@ -410,6 +473,14 @@ def run_node(config: OrbbecConfig) -> int:
                                 "[orbbec_camera] tick %d: Depth 帧为空，跳过",
                                 out.timestamp_ms,
                             )
+
+                    if config.point_cloud.enabled and out.point_cloud is not None:
+                        _send_point_cloud_output(
+                            node,
+                            out.point_cloud,
+                            config,
+                            out.capture_timestamp_ns,
+                        )
 
                     if config.ir.enabled:
                         if out.ir is not None:

@@ -13,11 +13,45 @@ import time
 from multiprocessing.queues import Queue
 from typing import Any
 
-from .backend import CaptureBackend, OrbbeFrame
+import numpy as np
+
+from .backend import CaptureBackend, OrbbeFrame, OrbbecPointCloud
 from .config import OrbbecConfig
 
 
 FramePacket = tuple[int, OrbbeFrame]
+
+
+def _freeze_received_array(value: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """Restore immutable contiguous columns after multiprocessing unpickling."""
+    array = np.asarray(value, dtype=dtype)
+    if not array.flags.c_contiguous or not array.flags.aligned:
+        array = np.array(array, dtype=dtype, order="C", copy=True)
+    current: object | None = array
+    while isinstance(current, np.ndarray):
+        current.setflags(write=False)
+        current = current.base
+    return array
+
+
+def _freeze_received_point_cloud(cloud: OrbbecPointCloud) -> OrbbecPointCloud:
+    float32 = np.dtype(np.float32)
+    x = _freeze_received_array(cloud.x, float32)
+    y = _freeze_received_array(cloud.y, float32)
+    z = _freeze_received_array(cloud.z, float32)
+    rgb: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if cloud.rgb is not None:
+        uint8 = np.dtype(np.uint8)
+        rgb = tuple(_freeze_received_array(channel, uint8) for channel in cloud.rgb)
+    return OrbbecPointCloud(
+        width=cloud.width,
+        height=cloud.height,
+        is_dense=cloud.is_dense,
+        x=x,
+        y=y,
+        z=z,
+        rgb=rgb,
+    )
 
 
 def _put_latest(frame_queue: Queue, packet: FramePacket) -> None:
@@ -187,6 +221,8 @@ class IsolatedOrbbecBackend:
     def _accept_packet(self, packet: FramePacket) -> None:
         seq, frame = packet
         if int(seq) >= self._latest_seq:
+            if frame.point_cloud is not None:
+                frame.point_cloud = _freeze_received_point_cloud(frame.point_cloud)
             self._latest_seq = int(seq)
             self._latest_frame = frame
 

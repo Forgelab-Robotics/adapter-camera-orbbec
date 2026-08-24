@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import unittest
+import gc
 import threading
+import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
-from forge_msgs import CompressedImage, Image
+from forge_msgs import CompressedImage, Image, PointCloudView
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
-from forge_devices_orbbec_camera.backend import OrbbeFrame
-from forge_devices_orbbec_camera.config import OrbbecConfig
-from forge_devices_orbbec_camera import __version__
+from forge_devices_orbbec_camera import __version__, backend_orbbec
 from forge_devices_orbbec_camera import main as orbbec_main
-from forge_devices_orbbec_camera import backend_orbbec
+from forge_devices_orbbec_camera import snapshot as orbbec_snapshot
+from forge_devices_orbbec_camera.backend import OrbbeFrame, OrbbecPointCloud
+from forge_devices_orbbec_camera.config import OrbbecConfig
 
 
 class MessageBuilderTests(unittest.TestCase):
@@ -72,6 +74,7 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertEqual(frame.timestamp_ms, 123)
         self.assertEqual(frame.color_jpeg, payload)
         self.assertIsNone(frame.capture_timestamp_ns)
+        self.assertIsNone(frame.point_cloud)
 
     def test_jpeg_passthrough_prefers_color_jpeg_bytes(self) -> None:
         config = OrbbecConfig()
@@ -172,9 +175,458 @@ class MessageBuilderTests(unittest.TestCase):
         self.assertIsNone(orbbec_main._frame_to_color_image(frame, config))
         self.assertIsNone(orbbec_main._frame_to_depth_image(frame))
         self.assertIsNone(orbbec_main._frame_to_ir_image(frame))
+        self.assertIsNone(orbbec_main._frame_to_point_cloud(frame))
+
+
+class PointCloudMessageTests(unittest.TestCase):
+    @staticmethod
+    def _assert_read_only_contiguous(*arrays: np.ndarray) -> None:
+        for array in arrays:
+            if array.dtype == np.dtype(np.float32):
+                expected_dtype = np.dtype(np.float32)
+            else:
+                expected_dtype = np.dtype(np.uint8)
+            assert array.dtype == expected_dtype
+            assert array.flags.c_contiguous
+            assert not array.flags.writeable
+
+    def test_point_cloud_is_frozen_and_is_the_last_frame_field(self) -> None:
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            np.array([[1000.0, 2000.0, 3000.0]], dtype=np.float32),
+            np.ones((1, 1), dtype=np.float32),
+            width=1,
+            height=1,
+            position_value_scale=1.0,
+            colorized=False,
+        )
+
+        self.assertIsInstance(cloud, OrbbecPointCloud)
+        with self.assertRaises(FrozenInstanceError):
+            setattr(cloud, "width", 2)
+
+        frame = OrbbeFrame(None, None, None, 123, b"jpeg", 456, cloud)
+        self.assertEqual(frame.timestamp_ms, 123)
+        self.assertEqual(frame.color_jpeg, b"jpeg")
+        self.assertEqual(frame.capture_timestamp_ns, 456)
+        self.assertIs(frame.point_cloud, cloud)
+
+    def test_xyz_buffer_scales_to_metres_masks_invalid_and_detaches(self) -> None:
+        sdk_buffer = np.array(
+            [
+                [500.0, 1000.0, 1500.0],
+                [2000.0, 2500.0, 3000.0],
+                [np.inf, 0.0, 1000.0],
+                [-500.0, -1000.0, 250.0],
+            ],
+            dtype=np.float32,
+        )
+        depth = np.array([[1.0, 0.0], [1.0, 0.5]], dtype=np.float32)
+
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            sdk_buffer,
+            depth,
+            width=2,
+            height=2,
+            position_value_scale=2.0,
+            colorized=False,
+        )
+
+        self.assertEqual((cloud.width, cloud.height), (2, 2))
+        self.assertFalse(cloud.is_dense)
+        self.assertIsNone(cloud.rgb)
+        np.testing.assert_allclose(
+            cloud.x,
+            [[1.0, np.nan], [np.nan, -1.0]],
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            cloud.y,
+            [[2.0, np.nan], [np.nan, -2.0]],
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            cloud.z,
+            [[3.0, np.nan], [np.nan, 0.5]],
+            equal_nan=True,
+        )
+        self._assert_read_only_contiguous(cloud.x, cloud.y, cloud.z)
+
+        sdk_buffer[:] = -999.0
+        self.assertEqual(float(cloud.x[0, 0]), 1.0)
+        self.assertEqual(float(cloud.z[1, 1]), 0.5)
+
+    def test_xyzrgb_buffer_rounds_clips_masks_and_detaches(self) -> None:
+        sdk_buffer = np.array(
+            [
+                [1000.0, 2000.0, 3000.0, 1.4, 1.5, 300.1],
+                [4000.0, 5000.0, 6000.0, -2.0, np.nan, 254.6],
+                [7000.0, 8000.0, 9000.0, 10.0, 20.0, 30.0],
+                [np.nan, 11_000.0, 12_000.0, 40.0, 50.0, 60.0],
+            ],
+            dtype=np.float32,
+        )
+        depth = np.array([[1.0, 1.0], [0.0, 1.0]], dtype=np.float32)
+
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            sdk_buffer,
+            depth,
+            width=2,
+            height=2,
+            position_value_scale=0.5,
+            colorized=True,
+        )
+
+        self.assertFalse(cloud.is_dense)
+        self.assertIsNotNone(cloud.rgb)
+        red, green, blue = cloud.rgb or ()
+        np.testing.assert_allclose(
+            cloud.x,
+            [[0.5, 2.0], [np.nan, np.nan]],
+            equal_nan=True,
+        )
+        np.testing.assert_array_equal(red, [[1, 0], [0, 0]])
+        np.testing.assert_array_equal(green, [[2, 0], [0, 0]])
+        np.testing.assert_array_equal(blue, [[255, 255], [0, 0]])
+        self._assert_read_only_contiguous(
+            cloud.x,
+            cloud.y,
+            cloud.z,
+            red,
+            green,
+            blue,
+        )
+
+        sdk_buffer[:] = 99.0
+        self.assertEqual(float(cloud.x[0, 0]), 0.5)
+        self.assertEqual(int(blue[0, 0]), 255)
+
+    def test_point_cloud_buffer_rejects_invalid_dimensions_depth_and_scale(self) -> None:
+        valid_data = np.zeros((2, 3), dtype=np.float32)
+        valid_depth = np.ones((1, 2), dtype=np.float32)
+
+        for width, height in ((0, 1), (-1, 1), (1, 0), (1, -1)):
+            with self.subTest(width=width, height=height), self.assertRaisesRegex(
+                ValueError, "dimensions"
+            ):
+                backend_orbbec._point_cloud_from_sdk_buffer(
+                    valid_data,
+                    valid_depth,
+                    width=width,
+                    height=height,
+                    position_value_scale=1.0,
+                    colorized=False,
+                )
+
+        invalid_depths = (
+            np.ones((1, 2), dtype=np.float64),
+            np.ones(2, dtype=np.float32),
+            np.ones((1, 2, 1), dtype=np.float32),
+            np.ones((2, 1), dtype=np.float32),
+        )
+        for depth in invalid_depths:
+            with self.subTest(depth_shape=depth.shape, depth_dtype=depth.dtype), self.assertRaises(
+                ValueError
+            ):
+                backend_orbbec._point_cloud_from_sdk_buffer(
+                    valid_data,
+                    depth,
+                    width=2,
+                    height=1,
+                    position_value_scale=1.0,
+                    colorized=False,
+                )
+
+        for scale in (0.0, -1.0, np.nan, np.inf, object()):
+            with self.subTest(scale=scale), self.assertRaisesRegex(ValueError, "scale"):
+                backend_orbbec._point_cloud_from_sdk_buffer(
+                    valid_data,
+                    valid_depth,
+                    width=2,
+                    height=1,
+                    position_value_scale=scale,
+                    colorized=False,
+                )
+
+    def test_point_cloud_buffer_rejects_wrong_sizes_and_noncontiguous_data(self) -> None:
+        depth = np.ones((1, 2), dtype=np.float32)
+        for colorized, component_count in ((False, 3), (True, 6)):
+            expected_bytes = 2 * component_count * np.dtype(np.float32).itemsize
+            for actual_bytes in (expected_bytes - 1, expected_bytes + 1):
+                with self.subTest(
+                    colorized=colorized,
+                    actual_bytes=actual_bytes,
+                ), self.assertRaisesRegex(ValueError, "unexpected size"):
+                    backend_orbbec._point_cloud_from_sdk_buffer(
+                        bytearray(actual_bytes),
+                        depth,
+                        width=2,
+                        height=1,
+                        position_value_scale=1.0,
+                        colorized=colorized,
+                    )
+
+            noncontiguous = np.zeros(expected_bytes * 2, dtype=np.uint8)[::2]
+            self.assertFalse(noncontiguous.flags.c_contiguous)
+            with self.subTest(colorized=colorized), self.assertRaisesRegex(
+                ValueError, "not contiguous"
+            ):
+                backend_orbbec._point_cloud_from_sdk_buffer(
+                    noncontiguous,
+                    depth,
+                    width=2,
+                    height=1,
+                    position_value_scale=1.0,
+                    colorized=colorized,
+                )
+
+    def test_point_cloud_message_is_zero_copy_for_arrow_and_view(self) -> None:
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            np.array(
+                [
+                    [1000.0, 2000.0, 3000.0, 10.0, 20.0, 30.0],
+                    [4000.0, 5000.0, 6000.0, 40.0, 50.0, 60.0],
+                ],
+                dtype=np.float32,
+            ),
+            np.ones((1, 2), dtype=np.float32),
+            width=2,
+            height=1,
+            position_value_scale=1.0,
+            colorized=True,
+        )
+        frame = OrbbeFrame(None, None, None, point_cloud=cloud)
+
+        owner = orbbec_main._frame_to_point_cloud(frame)
+
+        self.assertIsNotNone(owner)
+        assert owner is not None
+        arrow = owner.to_arrow()
+        view = PointCloudView.from_arrow(arrow)
+        self.assertEqual((view.width, view.height, view.point_count), (2, 1, 2))
+        self.assertTrue(view.is_dense)
+        self.assertTrue(view.has_rgb)
+        cloud_x_address = cloud.x.__array_interface__["data"][0]
+        x_column = arrow.column(arrow.schema.get_field_index("x"))
+        x_values_buffer = x_column.values.buffers()[1]
+        self.assertIsNotNone(x_values_buffer)
+        assert x_values_buffer is not None
+        self.assertEqual(x_values_buffer.address, cloud_x_address)
+        self.assertEqual(view.x.__array_interface__["data"][0], cloud_x_address)
+
+    def test_point_cloud_arrow_keeps_numpy_buffers_alive(self) -> None:
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            np.array([[1000.0, 2000.0, 3000.0]], dtype=np.float32),
+            np.ones((1, 1), dtype=np.float32),
+            width=1,
+            height=1,
+            position_value_scale=1.0,
+            colorized=False,
+        )
+        frame = OrbbeFrame(None, None, None, point_cloud=cloud)
+        owner = orbbec_main._frame_to_point_cloud(frame)
+        self.assertIsNotNone(owner)
+        assert owner is not None
+        arrow = owner.to_arrow()
+        x_address = cloud.x.__array_interface__["data"][0]
+
+        del owner, frame, cloud
+        gc.collect()
+
+        view = PointCloudView.from_arrow(arrow)
+        self.assertEqual(view.x.__array_interface__["data"][0], x_address)
+        np.testing.assert_allclose(view.x, [1.0])
+
+    def test_point_cloud_build_failure_does_not_drop_image_outputs(self) -> None:
+        config = OrbbecConfig()
+        config.point_cloud.enabled = True
+        config.ir.enabled = True
+        frame = OrbbeFrame(
+            color=np.zeros((2, 3, 3), dtype=np.uint8),
+            depth=np.ones((2, 3), dtype=np.float32),
+            ir=np.zeros((2, 3), dtype=np.uint8),
+            point_cloud=mock.sentinel.cloud,
+        )
+
+        with mock.patch.object(
+            orbbec_main,
+            "_frame_to_point_cloud",
+            side_effect=ValueError("invalid point cloud"),
+        ):
+            encoded = orbbec_main._encode_frame(frame, config, seq=9)
+
+        self.assertIsNotNone(encoded.color)
+        self.assertIsNotNone(encoded.depth)
+        self.assertIsNotNone(encoded.ir)
+        self.assertIsNone(encoded.point_cloud)
+
+    def test_point_cloud_send_uses_output_and_metadata_and_isolates_failure(self) -> None:
+        config = OrbbecConfig()
+        config.output_point_cloud = "cloud/organized"
+        config.point_cloud.frame_id = "camera_depth_optical_frame"
+        node = mock.Mock()
+
+        self.assertTrue(
+            orbbec_main._send_point_cloud_output(
+                node,
+                mock.sentinel.payload,
+                config,
+                1_234_567_890,
+            )
+        )
+        node.send_output.assert_called_once_with(
+            "cloud/organized",
+            mock.sentinel.payload,
+            metadata={
+                "capture_timestamp_ns": 1_234_567_890,
+                "frame_id": "camera_depth_optical_frame",
+            },
+        )
+
+        node.send_output.side_effect = RuntimeError("output unavailable")
+        self.assertFalse(
+            orbbec_main._send_point_cloud_output(
+                node,
+                mock.sentinel.payload,
+                config,
+                1_234_567_890,
+            )
+        )
+
+    def test_snapshot_disables_point_cloud_without_mutating_config(self) -> None:
+        config = OrbbecConfig()
+        config.point_cloud.enabled = True
+        backend = mock.Mock()
+        backend.capture_frame.side_effect = [
+            OrbbeFrame(None, None, None),
+            OrbbeFrame(None, None, None),
+            OrbbeFrame(
+                np.full((2, 2, 3), 255, dtype=np.uint8),
+                None,
+                None,
+            ),
+        ]
+
+        with (
+            mock.patch.object(
+                orbbec_snapshot,
+                "create_backend",
+                return_value=backend,
+            ) as create_backend,
+            mock.patch.object(orbbec_snapshot, "_write_frame_color"),
+        ):
+            result = orbbec_snapshot.run_snapshot(config, "snapshot.jpg")
+
+        self.assertEqual(result, 0)
+        self.assertTrue(config.point_cloud.enabled)
+        captured_config = create_backend.call_args.args[0]
+        self.assertIsNot(captured_config, config)
+        self.assertFalse(captured_config.point_cloud.enabled)
+        backend.close.assert_called_once_with()
 
 
 class ConfigTests(unittest.TestCase):
+    def test_point_cloud_defaults(self) -> None:
+        config = OrbbecConfig()
+
+        self.assertFalse(config.point_cloud.enabled)
+        self.assertTrue(config.point_cloud.colorize)
+        self.assertIsNone(config.point_cloud.frame_id)
+        self.assertEqual(config.output_point_cloud, "point_cloud")
+
+    def test_point_cloud_section_and_output_id_are_strict(self) -> None:
+        for value in (False, 0, "", [], "enabled"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "point_cloud 须为映射"
+            ):
+                OrbbecConfig.from_dict({"point_cloud": value})
+
+        for value in (None, "", "   ", 123, True):
+            with self.subTest(output=value), self.assertRaisesRegex(
+                ValueError, "output_point_cloud"
+            ):
+                OrbbecConfig.from_dict({"output_point_cloud": value})
+
+        self.assertEqual(
+            OrbbecConfig.from_dict(
+                {"output_point_cloud": "  cloud/organized  "}
+            ).output_point_cloud,
+            "cloud/organized",
+        )
+
+    def test_point_cloud_boolean_fields_are_strict(self) -> None:
+        for field in ("enabled", "colorize"):
+            for value in ("true", "false", 0, 1):
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ValueError, rf"point_cloud\.{field}"
+                ):
+                    OrbbecConfig.from_dict({"point_cloud": {field: value}})
+
+    def test_point_cloud_frame_id_is_trimmed_and_strict(self) -> None:
+        self.assertIsNone(
+            OrbbecConfig.from_dict(
+                {"point_cloud": {"frame_id": None}}
+            ).point_cloud.frame_id
+        )
+        config = OrbbecConfig.from_dict(
+            {"point_cloud": {"frame_id": "  camera_depth_optical_frame  "}}
+        )
+        self.assertEqual(
+            config.point_cloud.frame_id,
+            "camera_depth_optical_frame",
+        )
+
+        for frame_id in ("", "   ", 123, True):
+            with self.subTest(frame_id=frame_id), self.assertRaisesRegex(
+                ValueError, r"point_cloud\.frame_id"
+            ):
+                OrbbecConfig.from_dict(
+                    {"point_cloud": {"frame_id": frame_id}}
+                )
+
+    def test_point_cloud_requires_depth_and_color_alignment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "point_cloud.enabled.*depth.enabled"):
+            OrbbecConfig.from_dict(
+                {
+                    "depth": {"enabled": False},
+                    "point_cloud": {"enabled": True, "colorize": False},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "point_cloud.colorize.*align_mode"):
+            OrbbecConfig.from_dict(
+                {
+                    "align_mode": "disable",
+                    "point_cloud": {"enabled": True, "colorize": True},
+                }
+            )
+
+        for align_mode in ("sw", "hw"):
+            with self.subTest(align_mode=align_mode):
+                config = OrbbecConfig.from_dict(
+                    {
+                        "align_mode": align_mode,
+                        "point_cloud": {"enabled": True, "colorize": True},
+                    }
+                )
+                self.assertTrue(config.point_cloud.enabled)
+                self.assertTrue(config.point_cloud.colorize)
+
+    def test_xyz_point_cloud_allows_disabled_alignment(self) -> None:
+        config = OrbbecConfig.from_dict(
+            {
+                "align_mode": "disable",
+                "point_cloud": {
+                    "enabled": True,
+                    "colorize": False,
+                    "frame_id": "depth_frame",
+                },
+            }
+        )
+
+        self.assertTrue(config.point_cloud.enabled)
+        self.assertFalse(config.point_cloud.colorize)
+        self.assertEqual(config.point_cloud.frame_id, "depth_frame")
+
     def test_removed_doctor_subcommand_is_rejected(self) -> None:
         with mock.patch.object(orbbec_main.sys, "argv", ["orbbec-camera", "doctor"]):
             with self.assertRaises(SystemExit) as error:
@@ -319,6 +771,145 @@ class FrameExtractionTests(unittest.TestCase):
                     with mock.patch.object(backend_orbbec.logger, "warning") as warning:
                         self.assertIsNone(backend._extract_ir(frameset))
                     warning.assert_called()
+
+    def test_installed_sdk_point_cloud_api_smoke(self) -> None:
+        processor = backend_orbbec.ob.PointCloudFilter()
+        processor.set_color_data_normalization(False)
+        processor.set_create_point_format(backend_orbbec.ob.OBFormat.POINT)
+        processor.set_create_point_format(backend_orbbec.ob.OBFormat.RGB_POINT)
+        self.assertTrue(callable(processor.process))
+
+    def test_point_cloud_processor_is_not_created_when_disabled(self) -> None:
+        with mock.patch.object(backend_orbbec.ob, "PointCloudFilter") as factory:
+            processor = backend_orbbec._create_point_cloud_processor(False, True)
+
+        self.assertIsNone(processor)
+        factory.assert_not_called()
+
+    def test_point_cloud_processor_configures_xyz_and_xyzrgb_formats(self) -> None:
+        for colorize, expected_format in (
+            (False, backend_orbbec.ob.OBFormat.POINT),
+            (True, backend_orbbec.ob.OBFormat.RGB_POINT),
+        ):
+            processor = mock.Mock()
+            with self.subTest(colorize=colorize), mock.patch.object(
+                backend_orbbec.ob,
+                "PointCloudFilter",
+                return_value=processor,
+            ) as factory:
+                result = backend_orbbec._create_point_cloud_processor(True, colorize)
+
+            self.assertIs(result, processor)
+            factory.assert_called_once_with()
+            processor.set_color_data_normalization.assert_called_once_with(False)
+            processor.set_create_point_format.assert_called_once_with(expected_format)
+
+    def test_point_cloud_processor_setup_failures_are_nonfatal(self) -> None:
+        failures = (
+            RuntimeError("factory unavailable"),
+            mock.Mock(
+                set_color_data_normalization=mock.Mock(
+                    side_effect=RuntimeError("normalization unsupported")
+                )
+            ),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure), mock.patch.object(
+                backend_orbbec.ob,
+                "PointCloudFilter",
+                side_effect=failure if isinstance(failure, Exception) else None,
+                return_value=None if isinstance(failure, Exception) else failure,
+            ):
+                self.assertIsNone(
+                    backend_orbbec._create_point_cloud_processor(True, True)
+                )
+
+    def test_extract_point_cloud_pushes_processed_depth_before_processing(self) -> None:
+        backend = self._backend()
+        backend._config.point_cloud.colorize = False
+        source_depth = mock.sentinel.source_depth
+        processed_depth = mock.sentinel.processed_depth
+        filtered = mock.Mock()
+        filtered.as_depth_frame.return_value = processed_depth
+        sdk_filter = mock.Mock()
+        sdk_filter.process.return_value = filtered
+        backend._depth_sdk_filters = [sdk_filter]
+
+        frameset = mock.Mock()
+        frameset.get_depth_frame.return_value = source_depth
+        processor = mock.Mock()
+        result = mock.Mock()
+        points = mock.Mock()
+        points.get_data.return_value = np.array(
+            [[1000.0, 2000.0, 3000.0]],
+            dtype=np.float32,
+        )
+        points.get_width.return_value = 1
+        points.get_height.return_value = 1
+        points.get_position_value_scale.return_value = 1.0
+        result.as_points_frame.return_value = points
+        processor.process.return_value = result
+        backend._point_cloud = processor
+        manager = mock.Mock()
+        manager.attach_mock(frameset.push_frame, "push_frame")
+        manager.attach_mock(processor.process, "process")
+
+        actual_processed_depth = backend._process_depth_frame(frameset)
+        cloud = backend._extract_point_cloud(
+            frameset,
+            actual_processed_depth,
+            np.ones((1, 1), dtype=np.float32),
+        )
+
+        self.assertIs(actual_processed_depth, processed_depth)
+        sdk_filter.process.assert_called_once_with(source_depth)
+        self.assertEqual(
+            manager.mock_calls[:2],
+            [
+                mock.call.push_frame(processed_depth),
+                mock.call.process(frameset),
+            ],
+        )
+        self.assertIsNotNone(cloud)
+        assert cloud is not None
+        self.assertEqual(float(cloud.x[0, 0]), 1.0)
+
+    def test_point_cloud_conversion_failure_keeps_image_outputs(self) -> None:
+        backend = self._backend()
+        backend._config.point_cloud.enabled = True
+        backend._config.ir.enabled = True
+        backend._point_cloud = mock.sentinel.processor
+        backend._point_cloud_failure_logged = False
+        color = np.zeros((2, 2, 3), dtype=np.uint8)
+        depth = np.ones((2, 2), dtype=np.float32)
+        ir = np.zeros((2, 2), dtype=np.uint8)
+        processed_depth = mock.sentinel.processed_depth
+        backend._extract_color = mock.Mock(return_value=(color, None))
+        backend._process_depth_frame = mock.Mock(return_value=processed_depth)
+        backend._depth_frame_to_metres = mock.Mock(return_value=depth)
+        backend._extract_point_cloud = mock.Mock(
+            side_effect=RuntimeError("SDK projection failed")
+        )
+        backend._extract_ir = mock.Mock(return_value=ir)
+        color_frame = mock.Mock()
+        color_frame.get_timestamp.return_value = 123
+        frameset = mock.Mock()
+        frameset.get_color_frame.return_value = color_frame
+
+        frame = backend._convert_frameset(frameset)
+
+        self.assertIs(frame.color, color)
+        self.assertIs(frame.depth, depth)
+        self.assertIs(frame.ir, ir)
+        self.assertIsNone(frame.point_cloud)
+        backend._process_depth_frame.assert_called_once_with(frameset)
+        backend._depth_frame_to_metres.assert_called_once_with(processed_depth)
+        backend._extract_point_cloud.assert_called_once_with(
+            frameset,
+            processed_depth,
+            depth,
+        )
+        backend._extract_ir.assert_called_once_with(frameset)
 
 
 class BackendLifecycleTests(unittest.TestCase):
@@ -537,6 +1128,7 @@ class ExampleDataflowTests(unittest.TestCase):
         self.assertIn("99-obsensor-libusb.rules", spec)
         self.assertIn("forge_devices_orbbec_camera/resources", spec)
         self.assertIn("THIRD_PARTY_LICENSES.txt", spec)
+        self.assertIn('"forge_msgs.point_cloud"', spec)
         entry = (PACKAGE_ROOT / "scripts" / "pyinstaller_entry.py").read_text()
         self.assertIn("multiprocessing.freeze_support()", entry)
         project = (PACKAGE_ROOT / "pyproject.toml").read_text()
@@ -561,19 +1153,53 @@ class ExampleDataflowTests(unittest.TestCase):
         ]
         self.assertEqual(importing_files, ["backend_orbbec.py"])
 
-    def test_standard_dora_sink_decodes_both_message_types(self) -> None:
+    def test_standard_dora_example_routes_synchronized_colorized_cloud(self) -> None:
+        example_dir = PACKAGE_ROOT / "examples" / "dora_sensor_stream"
+        config = OrbbecConfig.from_yaml_path(example_dir / "sensor_node.yaml")
+        self.assertEqual(config.align_mode, "sw")
+        self.assertTrue(config.frame_sync)
+        self.assertTrue(config.point_cloud.enabled)
+        self.assertTrue(config.point_cloud.colorize)
+        dataflow = (example_dir / "dataflow.yaml").read_text(encoding="utf-8")
+        self.assertIn("point_cloud: sensor_node/point_cloud", dataflow)
+
+    def test_standard_dora_sink_decodes_all_message_types(self) -> None:
         sink_path = PACKAGE_ROOT / "examples" / "dora_sensor_stream" / "test_sink.py"
         namespace: dict[str, object] = {"__name__": "test_sink_module"}
         exec(sink_path.read_text(encoding="utf-8"), namespace)
         decode_message = namespace["decode_message"]
 
         raw = Image.from_numpy(np.zeros((2, 3), dtype=np.float32), encoding="32FC1")
-        self.assertEqual(decode_message(raw.to_arrow()), (3, 2, "32FC1"))
+        self.assertEqual(
+            decode_message("depth", raw.to_arrow()),
+            "type=Image size=3x2 encoding=32FC1",
+        )
 
         compressed = CompressedImage.from_numpy(
             np.zeros((2, 3, 3), dtype=np.uint8), format="jpeg"
         )
-        self.assertEqual(decode_message(compressed.to_arrow()), (3, 2, "jpeg"))
+        self.assertEqual(
+            decode_message("color", compressed.to_arrow()),
+            "type=CompressedImage size=3x2 encoding=jpeg",
+        )
+
+        cloud = backend_orbbec._point_cloud_from_sdk_buffer(
+            np.array([[1000.0, 2000.0, 3000.0]], dtype=np.float32),
+            np.ones((1, 1), dtype=np.float32),
+            width=1,
+            height=1,
+            position_value_scale=1.0,
+            colorized=False,
+        )
+        owner = orbbec_main._frame_to_point_cloud(
+            OrbbeFrame(None, None, None, point_cloud=cloud)
+        )
+        self.assertIsNotNone(owner)
+        assert owner is not None
+        self.assertEqual(
+            decode_message("point_cloud", owner.to_arrow()),
+            "type=PointCloud size=1x1 point_count=1 is_dense=True has_rgb=False",
+        )
 
 
 if __name__ == "__main__":

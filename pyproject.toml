@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "dora-rs==0.4.1",
     "forge-common==1.0.1",
-    "forge-msgs==1.0.1",
+    "forge-msgs==1.1.0",
     "pyorbbecsdk2>=2.0.18,<3",
     "numpy>=1.26,<3",
     "opencv-python>=4.8,<6",

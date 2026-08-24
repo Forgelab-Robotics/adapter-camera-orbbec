@@ -242,6 +242,15 @@ laser:
 # ⚠️  Depth 与 IR 共用同一物理传感器，分辨率（width/height/fps）须保持一致
 align_mode: disable                # disable（默认，三路独立）/ sw（depth 对齐到 color）/ hw
 
+# ── Forge PointCloud v1（可选，默认关闭）─────────────────────────────────────
+# enabled=true 依赖 Depth；colorize=true 还依赖 Color 和 sw/hw D2C。
+# disable + colorize=false 的 XYZ 位于 Depth optical frame；sw/hw 着色点云位于 Color optical frame。
+# organized XYZ 为 float32 米制，无效槽位的 XYZ 均为 NaN；可选 RGB 为 uint8，无效点为黑色。
+point_cloud:
+  enabled: false
+  colorize: true
+  frame_id: null                    # null 时不附加 frame_id metadata
+
 # ── 帧同步 ───────────────────────────────────────────────────────────────────
 frame_sync: false                  # 硬件帧同步，多台摄像头同步时使用
 
@@ -255,3 +264,4 @@ capture_process: isolated          # Dora 节点推荐隔离 SDK；单独工具�
 output_color: image/color          # Color 输出 topic
 output_depth: image/depth          # Depth 输出 topic
 output_ir: image/ir                # IR 输出 topic
+output_point_cloud: point_cloud    # Forge PointCloud v1 输出 topic

@@ -209,6 +209,15 @@ class LaserConfig:
 
 
 @dataclass
+class PointCloudConfig:
+    """可选 Forge PointCloud v1 输出配置。"""
+
+    enabled: bool = False
+    colorize: bool = True
+    frame_id: str | None = None
+
+
+@dataclass
 class OrbbecConfig:
     """Orbbec 传感器节点完整配置（针对 Gemini 2）。"""
 
@@ -221,6 +230,7 @@ class OrbbecConfig:
     depth: DepthStreamConfig = field(default_factory=DepthStreamConfig)
     ir: IrStreamConfig = field(default_factory=IrStreamConfig)
     laser: LaserConfig = field(default_factory=LaserConfig)
+    point_cloud: PointCloudConfig = field(default_factory=PointCloudConfig)
 
     # 全局（重启生效）
     align_mode: Literal["disable", "sw", "hw"] = "disable"
@@ -236,6 +246,7 @@ class OrbbecConfig:
     output_color: str = "image/color"
     output_depth: str = "image/depth"
     output_ir: str = "image/ir"
+    output_point_cloud: str = "point_cloud"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OrbbecConfig":
@@ -477,6 +488,26 @@ class OrbbecConfig:
                 ldp_enabled=_bool("laser.ldp_enabled", c.get("ldp_enabled", True)),
             )
 
+        def _point_cloud(d: dict[str, Any]) -> PointCloudConfig:
+            raw_value = d.get("point_cloud")
+            raw = {} if raw_value is None else raw_value
+            if not isinstance(raw, dict):
+                raise ValueError("point_cloud 须为映射")
+            frame_id = raw.get("frame_id")
+            if frame_id is not None:
+                if not isinstance(frame_id, str) or not frame_id.strip():
+                    raise ValueError("point_cloud.frame_id 须为非空字符串或 null")
+                frame_id = frame_id.strip()
+            return PointCloudConfig(
+                enabled=_bool(
+                    "point_cloud.enabled", raw.get("enabled", False)
+                ),
+                colorize=_bool(
+                    "point_cloud.colorize", raw.get("colorize", True)
+                ),
+                frame_id=frame_id,
+            )
+
         align_mode = data.get("align_mode", "disable")
         if align_mode not in ("disable", "sw", "hw"):
             raise ValueError(f"align_mode 须为 disable/sw/hw，当前: {align_mode}")
@@ -509,13 +540,30 @@ class OrbbecConfig:
         if device_index < 0:
             raise ValueError("device_index 不能为负数")
 
+        depth = _depth(data)
+        point_cloud = _point_cloud(data)
+        output_point_cloud = data.get("output_point_cloud", "point_cloud")
+        if (
+            not isinstance(output_point_cloud, str)
+            or not output_point_cloud.strip()
+        ):
+            raise ValueError("output_point_cloud 须为非空字符串")
+        output_point_cloud = output_point_cloud.strip()
+        if point_cloud.enabled and not depth.enabled:
+            raise ValueError("point_cloud.enabled=true 要求 depth.enabled=true")
+        if point_cloud.enabled and point_cloud.colorize and align_mode == "disable":
+            raise ValueError(
+                "point_cloud.colorize=true 要求 align_mode 为 sw 或 hw"
+            )
+
         return cls(
             device_serial=data.get("device_serial") or None,
             device_index=device_index,
             color=_color(data),
-            depth=_depth(data),
+            depth=depth,
             ir=_ir(data),
             laser=_laser(data),
+            point_cloud=point_cloud,
             align_mode=align_mode,
             frame_sync=_bool("frame_sync", data.get("frame_sync", False)),
             prewarm_frames=prewarm,
@@ -525,6 +573,7 @@ class OrbbecConfig:
             output_color=str(data.get("output_color", "image/color")),
             output_depth=str(data.get("output_depth", "image/depth")),
             output_ir=str(data.get("output_ir", "image/ir")),
+            output_point_cloud=output_point_cloud,
         )
 
     @classmethod

@@ -1,6 +1,11 @@
 device_index: 0
-align_mode: disable
+align_mode: sw
 capture_process: isolated
+frame_sync: true
+point_cloud:
+  enabled: true
+  colorize: true
+  frame_id: null
 color:
   data_flow:
     width: 640
@@ -27,3 +32,4 @@ ir:
 output_color: image/color
 output_depth: image/depth
 output_ir: image/ir
+output_point_cloud: point_cloud

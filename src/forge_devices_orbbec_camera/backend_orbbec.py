@@ -24,7 +24,7 @@ import numpy as np
 
 import pyorbbecsdk as ob
 
-from .backend import DeviceInfo, OrbbeFrame
+from .backend import DeviceInfo, OrbbeFrame, OrbbecPointCloud
 from .config import OrbbecConfig
 from forge_common import get_logger
 
@@ -34,6 +34,139 @@ if TYPE_CHECKING:
     pass
 
 _MAX_CONSECUTIVE_WAIT_ERRORS = 3
+
+
+def _freeze_contiguous(value: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """Return a C-contiguous array and make its complete base chain read-only."""
+    array = np.asarray(value, dtype=dtype)
+    if not array.flags.c_contiguous or not array.flags.aligned:
+        array = np.array(array, dtype=dtype, order="C", copy=True)
+    current: object | None = array
+    while isinstance(current, np.ndarray):
+        current.setflags(write=False)
+        current = current.base
+    return array
+
+
+def _point_cloud_from_sdk_buffer(
+    data: object,
+    depth_m: np.ndarray,
+    *,
+    width: int,
+    height: int,
+    position_value_scale: float,
+    colorized: bool,
+) -> OrbbecPointCloud:
+    """Detach an Orbbec POINT/RGB_POINT AoS buffer into PointCloud v1 columns."""
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Orbbec point-cloud dimensions must be positive, got {width}x{height}")
+
+    depth = np.asarray(depth_m)
+    if depth.dtype != np.dtype(np.float32) or depth.ndim != 2:
+        raise ValueError("Orbbec point-cloud depth must be a float32 image")
+    if depth.shape != (height, width):
+        raise ValueError(
+            "Orbbec point-cloud dimensions do not match the published depth image"
+        )
+
+    try:
+        scale = float(position_value_scale)
+    except (TypeError, ValueError) as e:
+        raise ValueError("Orbbec point-cloud position scale is invalid") from e
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            f"Orbbec point-cloud position scale must be finite and positive, got {scale}"
+        )
+
+    component_count = 6 if colorized else 3
+    point_count = width * height
+    expected_values = point_count * component_count
+    expected_bytes = expected_values * np.dtype(np.float32).itemsize
+    try:
+        buffer = memoryview(data)
+        if not buffer.contiguous:
+            raise ValueError("Orbbec point-cloud SDK buffer is not contiguous")
+        if buffer.nbytes != expected_bytes:
+            raise ValueError(
+                "Orbbec point-cloud SDK buffer has an unexpected size: "
+                f"expected {expected_bytes} bytes, got {buffer.nbytes}"
+            )
+        values = np.frombuffer(buffer, dtype=np.float32)
+    except (BufferError, TypeError, ValueError) as e:
+        if isinstance(e, ValueError) and str(e).startswith("Orbbec point-cloud"):
+            raise
+        raise ValueError("Orbbec point-cloud SDK buffer is invalid") from e
+    if values.size != expected_values:
+        raise ValueError(
+            "Orbbec point-cloud SDK buffer has an unexpected float count"
+        )
+
+    matrix = values.reshape(point_count, component_count)
+    scale_m = np.float32(scale * 0.001)
+    shape = (height, width)
+    x = np.array(matrix[:, 0] * scale_m, dtype=np.float32, order="C", copy=True).reshape(shape)
+    y = np.array(matrix[:, 1] * scale_m, dtype=np.float32, order="C", copy=True).reshape(shape)
+    z = np.array(matrix[:, 2] * scale_m, dtype=np.float32, order="C", copy=True).reshape(shape)
+
+    valid = np.isfinite(depth) & (depth > 0)
+    valid &= np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    invalid = ~valid
+    if np.any(invalid):
+        x[invalid] = np.nan
+        y[invalid] = np.nan
+        z[invalid] = np.nan
+
+    rgb: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if colorized:
+        source_rgb = matrix[:, 3:6]
+        finite_rgb = np.isfinite(source_rgb)
+        safe_rgb = np.where(finite_rgb, source_rgb, np.float32(0.0))
+        packed_rgb = np.clip(np.rint(safe_rgb), 0, 255).astype(np.uint8)
+        red = np.array(packed_rgb[:, 0], dtype=np.uint8, order="C", copy=True).reshape(shape)
+        green = np.array(packed_rgb[:, 1], dtype=np.uint8, order="C", copy=True).reshape(shape)
+        blue = np.array(packed_rgb[:, 2], dtype=np.uint8, order="C", copy=True).reshape(shape)
+        if np.any(invalid):
+            red[invalid] = 0
+            green[invalid] = 0
+            blue[invalid] = 0
+        rgb = (red, green, blue)
+
+    float32 = np.dtype(np.float32)
+    x = _freeze_contiguous(x, float32)
+    y = _freeze_contiguous(y, float32)
+    z = _freeze_contiguous(z, float32)
+    if rgb is not None:
+        uint8 = np.dtype(np.uint8)
+        rgb = tuple(_freeze_contiguous(channel, uint8) for channel in rgb)
+
+    return OrbbecPointCloud(
+        width=width,
+        height=height,
+        is_dense=bool(valid.all()),
+        x=x,
+        y=y,
+        z=z,
+        rgb=rgb,
+    )
+
+
+def _create_point_cloud_processor(
+    enabled: bool,
+    colorize: bool,
+) -> object | None:
+    """Create the optional SDK processor without making camera startup fatal."""
+    if not enabled:
+        return None
+    try:
+        processor = ob.PointCloudFilter()
+        processor.set_color_data_normalization(False)
+        processor.set_create_point_format(
+            ob.OBFormat.RGB_POINT if colorize else ob.OBFormat.POINT
+        )
+        return processor
+    except Exception as e:
+        logger.warning("[orbbec_camera] 点云处理器初始化失败，继续输出图像: %s", e)
+        return None
 
 
 def _reshape_raw_frame(
@@ -136,8 +269,12 @@ class OrbbecBackend:
         self._terminal_error: str | None = None
         # SDK 后处理滤波链（在 _capture_loop 中初始化，每帧按序应用）
         self._depth_sdk_filters: list = []
-        # 是否已通过硬件写入深度范围（True 则 _extract_depth 跳过软件裁剪）
+        # 是否已通过硬件写入深度范围（True 则深度转换跳过软件裁剪）
         self._depth_hw_range_ok: bool = False
+        # Created in the capture thread after pipeline.start(), matching the SDK
+        # examples and keeping all filter lifecycle work on the owning thread.
+        self._point_cloud: object | None = None
+        self._point_cloud_failure_logged = False
 
         self._thread = threading.Thread(
             target=self._capture_loop,
@@ -246,6 +383,19 @@ class OrbbecBackend:
             self._apply_and_verify_properties(pipeline)
             # 构建 SDK 后处理滤波链（必须在 pipeline.start() 之后）
             self._build_depth_sdk_filters(pipeline)
+            self._point_cloud = _create_point_cloud_processor(
+                cfg.point_cloud.enabled,
+                cfg.point_cloud.colorize,
+            )
+            if (
+                cfg.point_cloud.enabled
+                and cfg.point_cloud.colorize
+                and not cfg.frame_sync
+            ):
+                logger.warning(
+                    "[orbbec_camera] 彩色点云未启用 frame_sync；空间对齐有效，"
+                    "但动态场景的 Color/Depth 时间对应仅为 best-effort"
+                )
 
             self._init_done.set()
 
@@ -783,12 +933,34 @@ class OrbbecBackend:
         self._set_prop_int(device, P.OB_PROP_LASER_POWER_LEVEL_CONTROL_INT, laser.power_level, "laser.power_level")  # [0,5]
 
     def _convert_frameset(self, frameset: ob.FrameSet) -> OrbbeFrame:
-        """将 pyorbbecsdk FrameSet 转换为 OrbbeFrame。"""
+        """将 pyorbbecsdk FrameSet 转换为 SDK-free 图像与可选点云。"""
         color_frame = frameset.get_color_frame()
         timestamp_ms = int(color_frame.get_timestamp()) if color_frame is not None else 0
 
         color, color_jpeg = self._extract_color(frameset)
-        depth = self._extract_depth(frameset) if self._config.depth.enabled else None
+        processed_depth = (
+            self._process_depth_frame(frameset) if self._config.depth.enabled else None
+        )
+        depth = self._depth_frame_to_metres(processed_depth)
+        point_cloud: OrbbecPointCloud | None = None
+        if self._config.point_cloud.enabled and self._point_cloud is not None:
+            try:
+                point_cloud = self._extract_point_cloud(
+                    frameset,
+                    processed_depth,
+                    depth,
+                )
+            except Exception as e:
+                if not getattr(self, "_point_cloud_failure_logged", False):
+                    logger.warning(
+                        "[orbbec_camera] 点云转换失败，继续输出图像: %s",
+                        e,
+                    )
+                self._point_cloud_failure_logged = True
+            else:
+                if getattr(self, "_point_cloud_failure_logged", False):
+                    logger.info("[orbbec_camera] 点云转换已恢复")
+                self._point_cloud_failure_logged = False
         ir = self._extract_ir(frameset) if self._config.ir.enabled else None
 
         return OrbbeFrame(
@@ -797,6 +969,7 @@ class OrbbecBackend:
             ir=ir,
             timestamp_ms=timestamp_ms,
             color_jpeg=color_jpeg,
+            point_cloud=point_cloud,
         )
 
     def _extract_color(self, frameset: ob.FrameSet) -> tuple[np.ndarray | None, bytes | None]:
@@ -870,46 +1043,103 @@ class OrbbecBackend:
         logger.warning("[orbbec_camera] 不支持的 Color 帧格式: %s", fmt)
         return None, None
 
-    def _extract_depth(self, frameset: ob.FrameSet) -> np.ndarray | None:
-        """提取 Depth：HW float32，单位米。单次 uint16→米，并就地裁剪。"""
-        frame = frameset.get_depth_frame()
+    def _process_depth_frame(self, frameset: ob.FrameSet) -> object | None:
+        """Apply the SDK filter chain once and return the shared Depth frame."""
+        source = frameset.get_depth_frame()
+        if source is None:
+            return None
+        if not self._depth_sdk_filters:
+            return source
+
+        try:
+            processed: object = source
+            for sdk_filter in self._depth_sdk_filters:
+                result = sdk_filter.process(processed)
+                if result is not None:
+                    processed = result
+            depth_frame = processed.as_depth_frame()  # type: ignore[attr-defined]
+            if depth_frame is not None:
+                return depth_frame
+            logger.warning(
+                "[orbbec_camera] SDK 滤波链未返回 DepthFrame，使用原始 Depth"
+            )
+        except Exception as e:
+            logger.warning("[orbbec_camera] SDK 滤波链应用失败（跳过）: %s", e)
+        return source
+
+    def _depth_frame_to_metres(self, frame: object | None) -> np.ndarray | None:
+        """Convert one processed SDK Depth frame to a float32 image in metres."""
         if frame is None:
             return None
-
-        if self._depth_sdk_filters:
-            try:
-                processed = frame
-                for f in self._depth_sdk_filters:
-                    result = f.process(processed)
-                    if result is not None:
-                        processed = result
-                frame = processed.as_depth_frame()
-                if frame is None:
-                    return None
-            except Exception as e:
-                logger.warning("[orbbec_camera] SDK 滤波链应用失败（跳过）: %s", e)
-
-        w, h = frame.get_width(), frame.get_height()
-        try:
-            raw = np.frombuffer(frame.get_data(), dtype=np.uint16).reshape(h, w)
-        except ValueError:
+        width = int(frame.get_width())  # type: ignore[attr-defined]
+        height = int(frame.get_height())  # type: ignore[attr-defined]
+        raw = _reshape_raw_frame(
+            frame.get_data(),  # type: ignore[attr-defined]
+            dtype=np.uint16,
+            shape=(height, width),
+            stream="Depth",
+            format_name="Y16",
+        )
+        if raw is None:
             return None
-        scale = frame.get_depth_scale()
-        if scale <= 0:
-            logger.warning("[orbbec_camera] 非法 depth scale=%s，按 1.0 mm/pixel 处理", scale)
+
+        scale = float(frame.get_depth_scale())  # type: ignore[attr-defined]
+        if not np.isfinite(scale) or scale <= 0:
+            logger.warning(
+                "[orbbec_camera] 非法 depth scale=%s，按 1.0 mm/pixel 处理",
+                scale,
+            )
             scale = 1.0
         # SDK scale 为毫米/单位；一次乘到米，避免后续再扫一遍。
-        arr = raw.astype(np.float32, copy=False) * np.float32(scale * 0.001)
+        depth_m = raw.astype(np.float32, copy=False) * np.float32(scale * 0.001)
 
         if not self._depth_hw_range_ok:
             lo_m = self._config.depth.min_mm * 0.001
             hi_m = self._config.depth.max_mm * 0.001
             if lo_m > 0.0 or hi_m < 10.0:
-                invalid = (arr > 0.0) & ((arr < lo_m) | (arr > hi_m))
+                invalid = (depth_m > 0.0) & (
+                    (depth_m < lo_m) | (depth_m > hi_m)
+                )
                 if np.any(invalid):
-                    arr[invalid] = 0.0
+                    depth_m[invalid] = 0.0
 
-        return np.ascontiguousarray(arr)
+        return np.ascontiguousarray(depth_m)
+
+    def _extract_depth(self, frameset: ob.FrameSet) -> np.ndarray | None:
+        """Compatibility wrapper returning processed Depth in metres."""
+        return self._depth_frame_to_metres(self._process_depth_frame(frameset))
+
+    def _extract_point_cloud(
+        self,
+        frameset: ob.FrameSet,
+        depth_frame: object | None,
+        depth_m: np.ndarray | None,
+    ) -> OrbbecPointCloud | None:
+        """Generate a point cloud from the same processed Depth frame we publish."""
+        if depth_frame is None or depth_m is None:
+            return None
+        processor = self._point_cloud
+        if processor is None:
+            raise RuntimeError("Orbbec point-cloud processor is unavailable")
+
+        # FrameSet replaces an existing frame of the same type. This keeps XYZ/Z
+        # derived from the SDK-filtered Depth frame rather than the original frame.
+        frameset.push_frame(depth_frame)
+        result = processor.process(frameset)  # type: ignore[attr-defined]
+        if result is None:
+            return None
+        points_frame = result.as_points_frame()
+        if points_frame is None:
+            raise ValueError("Orbbec PointCloudFilter did not return a PointsFrame")
+
+        return _point_cloud_from_sdk_buffer(
+            points_frame.get_data(),
+            depth_m,
+            width=int(points_frame.get_width()),
+            height=int(points_frame.get_height()),
+            position_value_scale=float(points_frame.get_position_value_scale()),
+            colorized=self._config.point_cloud.colorize,
+        )
 
     def _extract_ir(self, frameset: ob.FrameSet) -> np.ndarray | None:
         """提取 IR 帧，返回 HW uint8（ir8/mjpg）或 uint16（ir16）numpy 数组。

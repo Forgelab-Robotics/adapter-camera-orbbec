@@ -20,6 +20,20 @@ Confirm the wheel and sdist contain `LICENSE`, use only public dependency source
 
 Complete the applicable hardware checks for device discovery, Color/Depth/IR capture, alignment, shutdown/reopen behavior, isolated process cleanup, and the failure modes affected by the release.
 
+## Hardware validation matrix
+
+For releases affecting point-cloud capture, record the camera model, firmware, SDK version, stream profiles, and results for each applicable row. Run every positive row with both `capture_process: direct` and `isolated`.
+
+| Case | Key configuration | Required observations |
+| --- | --- | --- |
+| Image regression | `point_cloud.enabled: false` | Color/Depth/IR behavior is unchanged and no `point_cloud` output is sent. |
+| XYZ in Depth frame | `enabled: true`, `colorize: false`, `align_mode: disable`, `frame_id: null` | `PointCloudView` decodes organized float32 XYZ in metres; scale matches a known distance; invalid points have all XYZ components NaN; RGB is absent; coordinates are in the Depth optical frame; `capture_timestamp_ns` is usable when present and `frame_id` is absent. |
+| XYZRGB with software D2C | `enabled: true`, `colorize: true`, `align_mode: sw`, non-null `frame_id` | The Dora example routes `point_cloud`; XYZ is in the Color optical frame; RGB is uint8 and spatially aligned; invalid XYZ is all NaN with black RGB; `capture_timestamp_ns` correlates the FrameSet and `frame_id` exactly matches the configured value. |
+| XYZRGB with hardware D2C | `enabled: true`, `colorize: true`, `align_mode: hw` | On supported hardware, results match software D2C semantics; unsupported hardware fails clearly rather than silently falling back. |
+| Invalid RGB configuration | `enabled: true`, `colorize: true`, `align_mode: disable` | Startup rejects RGB point-cloud output without software or hardware D2C. |
+
+For `isolated`, also verify clean child-process shutdown and account for the multiprocessing IPC/pickle frame copy in throughput and memory results. Neither a local `PointCloudView` nor these checks establishes end-to-end zero-copy transport.
+
 ## Source release
 
 Before creating a tag:

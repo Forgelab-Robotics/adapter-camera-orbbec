@@ -7,6 +7,7 @@ nodes:
       - image/color
       - image/depth
       - image/ir
+      - point_cloud
     args: "run --project ../.. orbbec-camera --config sensor_node.yaml"
 
   - id: test_sink
@@ -15,4 +16,5 @@ nodes:
       image/color: sensor_node/image/color
       image/depth: sensor_node/image/depth
       image/ir: sensor_node/image/ir
+      point_cloud: sensor_node/point_cloud
     args: "run --project ../.. python test_sink.py --config test_sink.yaml"

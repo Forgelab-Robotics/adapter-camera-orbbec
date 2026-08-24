@@ -96,7 +96,12 @@ def run_snapshot(
 ) -> int:
     """打开设备、采一帧并写出文件，成功返回 0。"""
     out_arg = Path(output).expanduser().resolve()
-    cfg = config
+    # Snapshot only writes image files. Avoid generating and pickling a large
+    # derived cloud, while leaving the caller's reusable config unchanged.
+    cfg = replace(
+        config,
+        point_cloud=replace(config.point_cloud, enabled=False),
+    )
     if jpeg_quality is not None:
         jq = max(1, min(100, int(jpeg_quality)))
         cfg = replace(cfg, color=replace(cfg.color, jpeg_quality=jq))
