@@ -1,0 +1,37 @@
+nodes:
+  - id: sensor_node
+    path: uv
+    inputs:
+      tick: dora/timer/millis/33
+    outputs:
+      - image/color
+      - image/depth
+      - image/ir
+      - point_cloud
+    args: "run --project ../.. orbbec-camera --config sensor_node.yaml"
+
+  - id: point_cloud_renderer
+    path: uv
+    inputs:
+      point_cloud: sensor_node/point_cloud
+    outputs:
+      - image/point_cloud
+    args: "run --project ../.. python point_cloud_renderer.py"
+
+  - id: image_viewer
+    path: image_viewer
+    inputs:
+      image/color: sensor_node/image/color
+      image/depth: sensor_node/image/depth
+      image/ir: sensor_node/image/ir
+      image/point_cloud: point_cloud_renderer/image/point_cloud
+
+  - id: test_sink
+    path: uv
+    inputs:
+      image/color: sensor_node/image/color
+      image/depth: sensor_node/image/depth
+      image/ir: sensor_node/image/ir
+      point_cloud: sensor_node/point_cloud
+      image/point_cloud: point_cloud_renderer/image/point_cloud
+    args: "run --project ../.. python test_sink.py --config test_sink.yaml"

@@ -1162,6 +1162,22 @@ class ExampleDataflowTests(unittest.TestCase):
         self.assertTrue(config.point_cloud.colorize)
         dataflow = (example_dir / "dataflow.yaml").read_text(encoding="utf-8")
         self.assertIn("point_cloud: sensor_node/point_cloud", dataflow)
+        self.assertNotIn("path: image_viewer", dataflow)
+
+        viewer_dataflow = (example_dir / "dataflow_viewer.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("point_cloud: sensor_node/point_cloud", viewer_dataflow)
+        self.assertIn("path: image_viewer", viewer_dataflow)
+        self.assertIn("id: point_cloud_renderer", viewer_dataflow)
+        self.assertIn("point_cloud: sensor_node/point_cloud", viewer_dataflow)
+        self.assertIn(
+            "image/point_cloud: point_cloud_renderer/image/point_cloud",
+            viewer_dataflow,
+        )
+        self.assertIn("image/color: sensor_node/image/color", viewer_dataflow)
+        self.assertIn("image/depth: sensor_node/image/depth", viewer_dataflow)
+        self.assertIn("image/ir: sensor_node/image/ir", viewer_dataflow)
 
     def test_standard_dora_sink_decodes_all_message_types(self) -> None:
         sink_path = PACKAGE_ROOT / "examples" / "dora_sensor_stream" / "test_sink.py"
