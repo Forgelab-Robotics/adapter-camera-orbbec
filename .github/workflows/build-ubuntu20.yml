@@ -28,10 +28,12 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             binutils \
+            build-essential \
             ca-certificates \
             curl \
             file \
             git \
+            linux-libc-dev \
             libusb-1.0-0
           rm -rf /var/lib/apt/lists/*
 
