@@ -33,8 +33,20 @@ jobs:
             curl \
             file \
             git \
-            linux-libc-dev \
-            libusb-1.0-0
+            libgl1 \
+            libglib2.0-0 \
+            libusb-1.0-0 \
+            libwayland-client0 \
+            libx11-6 \
+            libxcursor1 \
+            libxext6 \
+            libxinerama1 \
+            libxi6 \
+            libxkbcommon0 \
+            libxrandr2 \
+            libxss1 \
+            libxxf86vm1 \
+            linux-libc-dev
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
